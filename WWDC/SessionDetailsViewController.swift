@@ -12,15 +12,17 @@ import RxCocoa
 
 class SessionDetailsViewController: NSViewController {
 
+    private struct Metrics {
+        static let padding: CGFloat = 46
+    }
+
     private let disposeBag = DisposeBag()
 
     let listStyle: SessionsListStyle
 
     var viewModel: SessionViewModel? = nil {
         didSet {
-
-            informationStackView.animator().isHidden = (viewModel == nil)
-            shelfController.view.animator().isHidden = (viewModel == nil)
+            view.animator().alphaValue = (viewModel == nil) ? 0 : 1
 
             shelfController.viewModel = viewModel
             summaryController.viewModel = viewModel
@@ -31,7 +33,6 @@ class SessionDetailsViewController: NSViewController {
             }
 
             if viewModel.identifier != oldValue?.identifier {
-
                 showOverview()
             }
 
@@ -43,14 +44,15 @@ class SessionDetailsViewController: NSViewController {
             let instance = viewModel.sessionInstance
             let type = instance.type
 
-            let sessionHasNoVideo = (type == .lab || type == .getTogether) && !(instance.isCurrentlyLive == true)
+            let sessionHasNoVideo = [.lab, .getTogether, .labByAppointment].contains(type) && !(instance.isCurrentlyLive == true)
 
             shelfController.view.isHidden = sessionHasNoVideo
 
-            // Connect stack view (bottom half of screen), to the top of the view
-            // or to the bottom of the video, if it's present
+            // It's worth noting that this condition will always be true since the view
+            // gets loaded when add to the split view controller
             if isViewLoaded {
-
+                // Connect stack view (bottom half of screen), to the top of the view
+                // or to the bottom of the video, if it's present
                 shelfBottomConstraint.isActive = !sessionHasNoVideo
                 informationStackViewTopConstraint.isActive = sessionHasNoVideo
                 informationStackViewBottomConstraint.isActive = !sessionHasNoVideo
@@ -129,8 +131,8 @@ class SessionDetailsViewController: NSViewController {
         let v = SessionDetailsTabContainer()
 
         v.wantsLayer = true
-        v.setContentHuggingPriority(NSLayoutConstraint.Priority.defaultLow, for: .horizontal)
-        v.setContentHuggingPriority(NSLayoutConstraint.Priority.defaultLow, for: .vertical)
+        v.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        v.setContentHuggingPriority(.defaultLow, for: .vertical)
 
         return v
     }()
@@ -177,7 +179,7 @@ class SessionDetailsViewController: NSViewController {
     }()
 
     private lazy var informationStackViewBottomConstraint: NSLayoutConstraint = {
-        return self.informationStackView.bottomAnchor.constraint(equalTo: self.view.bottomAnchor, constant: -46)
+        return self.informationStackView.bottomAnchor.constraint(equalTo: self.view.bottomAnchor, constant: -Metrics.padding)
     }()
 
     override func loadView() {
@@ -191,27 +193,23 @@ class SessionDetailsViewController: NSViewController {
         constraint.priority = NSLayoutConstraint.Priority(rawValue: 999)
         constraint.isActive = true
 
-        shelfController.view.setContentCompressionResistancePriority(NSLayoutConstraint.Priority.defaultHigh, for: .vertical)
+        shelfController.view.setContentCompressionResistancePriority(.defaultHigh, for: .vertical)
 
         view.addSubview(shelfController.view)
         view.addSubview(informationStackView)
 
-        shelfController.view.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 46).isActive = true
-        shelfController.view.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -46).isActive = true
+        shelfController.view.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: Metrics.padding).isActive = true
+        shelfController.view.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -Metrics.padding).isActive = true
         shelfController.view.topAnchor.constraint(equalTo: view.topAnchor, constant: 22).isActive = true
 
-        informationStackView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 46).isActive = true
-        informationStackView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -46).isActive = true
+        informationStackView.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: Metrics.padding).isActive = true
+        informationStackView.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -Metrics.padding).isActive = true
         informationStackViewBottomConstraint.isActive = true
 
         shelfBottomConstraint.isActive = true
         informationStackViewTopConstraint.isActive = false
 
         showOverview()
-    }
-
-    override func viewDidLoad() {
-        super.viewDidLoad()
     }
 
     @objc private func tabButtonAction(_ sender: WWDCTextButton) {
@@ -247,14 +245,14 @@ class SessionDetailsViewController: NSViewController {
     }
 }
 
-fileprivate class SessionDetailsTabContainer: NSView {
+private class SessionDetailsTabContainer: NSView {
 
     var currentView: NSView? {
         didSet {
             oldValue?.removeFromSuperview()
 
             if let newView = currentView {
-                newView.autoresizingMask = [NSView.AutoresizingMask.width, NSView.AutoresizingMask.height]
+                newView.autoresizingMask = [.width, .height]
                 newView.frame = frame
 
                 addSubview(newView)

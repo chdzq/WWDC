@@ -11,13 +11,13 @@ import AVFoundation
 
 open class PUIPlayerWindow: NSWindow {
 
-    @IBInspectable @objc open var hidesTitlebar = true
+    @IBInspectable @objc open var hidesTitlebar: Bool = true
 
     // MARK: - Initialization
 
     public override init(contentRect: NSRect, styleMask style: NSWindow.StyleMask, backing bufferingType: NSWindow.BackingStoreType, defer flag: Bool) {
         var effectiveStyle = style
-        effectiveStyle.insert(NSWindow.StyleMask.fullSizeContentView)
+        effectiveStyle.insert(.fullSizeContentView)
 
         super.init(contentRect: contentRect, styleMask: effectiveStyle, backing: bufferingType, defer: flag)
 
@@ -33,13 +33,13 @@ open class PUIPlayerWindow: NSWindow {
     // MARK: - Custom appearance
 
     open override var effectiveAppearance: NSAppearance {
-        return NSAppearance(named: NSAppearance.Name.vibrantDark)!
+        return NSAppearance(named: .vibrantDark)!
     }
 
     fileprivate var titlebarWidgets = Set<NSButton>()
 
     fileprivate func appearanceForWidgets() -> NSAppearance? {
-        return NSAppearance(named: NSAppearance.Name.aqua)
+        return NSAppearance(named: .aqua)
     }
 
     fileprivate func applyAppearanceToWidgets() {
@@ -65,7 +65,8 @@ open class PUIPlayerWindow: NSWindow {
     fileprivate var titlebarSeparatorLayer: CALayer?
     fileprivate var titlebarGradientLayer: CAGradientLayer?
 
-    fileprivate var fullscreenObserver: NSObjectProtocol?
+    fileprivate var didEnterFullscreenObserver: NSObjectProtocol?
+    fileprivate var didExitFullscreenObserver: NSObjectProtocol?
 
     fileprivate func applyCustomizations(_ note: Notification? = nil) {
         titleVisibility = .hidden
@@ -131,13 +132,13 @@ open class PUIPlayerWindow: NSWindow {
     }
 
     fileprivate func installFullscreenObserverIfNeeded() {
-        guard fullscreenObserver == nil else { return }
+        guard didEnterFullscreenObserver == nil else { return }
 
         let nc = NotificationCenter.default
 
         // the customizations (especially the title text field ones) have to be reapplied when entering and exiting fullscreen
-        nc.addObserver(forName: NSWindow.didEnterFullScreenNotification, object: self, queue: nil, using: applyCustomizations)
-        nc.addObserver(forName: NSWindow.didExitFullScreenNotification, object: self, queue: nil, using: applyCustomizations)
+        didEnterFullscreenObserver = nc.addObserver(forName: NSWindow.didEnterFullScreenNotification, object: self, queue: nil, using: { [weak self] _ in self?.applyCustomizations() })
+        didExitFullscreenObserver = nc.addObserver(forName: NSWindow.didExitFullScreenNotification, object: self, queue: nil, using: { [weak self] _ in self?.applyCustomizations() })
     }
 
     open override func makeKeyAndOrderFront(_ sender: Any?) {
@@ -151,13 +152,13 @@ open class PUIPlayerWindow: NSWindow {
     public private(set) var titlebarCompanionViews = [NSView]()
 
     public func addTitlebarCompanion(view: NSView) {
-        guard titlebarCompanionViews.index(of: view) == nil else { return }
+        guard titlebarCompanionViews.firstIndex(of: view) == nil else { return }
 
         titlebarCompanionViews.append(view)
     }
 
     public func removeTitlebarCompanion(view: NSView) {
-        guard let index = titlebarCompanionViews.index(of: view) else { return }
+        guard let index = titlebarCompanionViews.firstIndex(of: view) else { return }
 
         titlebarCompanionViews.remove(at: index)
     }
@@ -183,8 +184,8 @@ open class PUIPlayerWindow: NSWindow {
         }, completionHandler: nil)
     }
 
-    open override func standardWindowButton(_ b: NSWindow.ButtonType) -> NSButton? {
-        guard let button = super.standardWindowButton(b) else { return nil }
+    open override func standardWindowButton(_ type: NSWindow.ButtonType) -> NSButton? {
+        guard let button = super.standardWindowButton(type) else { return nil }
 
         titlebarWidgets.insert(button)
 
@@ -201,9 +202,9 @@ open class PUIPlayerWindow: NSWindow {
 
     open override var contentView: NSView? {
         set {
-            let darkContentView = PUIPlayerWindowContentView(frame: newValue?.frame ?? NSZeroRect)
+            let darkContentView = PUIPlayerWindowContentView(frame: newValue?.frame ?? NSRect.zero)
             if let newContentView = newValue {
-                newContentView.autoresizingMask = [NSView.AutoresizingMask.width, NSView.AutoresizingMask.height]
+                newContentView.autoresizingMask = [.width, .height]
                 darkContentView.addSubview(newContentView)
             }
             super.contentView = darkContentView
@@ -221,7 +222,7 @@ private class PUIPlayerWindowContentView: NSView {
 
     fileprivate func installOverlayView() {
         overlayView = PUIPlayerWindowOverlayView(frame: bounds)
-        overlayView!.autoresizingMask = [NSView.AutoresizingMask.width, NSView.AutoresizingMask.height]
+        overlayView!.autoresizingMask = [.width, .height]
         addSubview(overlayView!, positioned: .above, relativeTo: subviews.last)
     }
 
@@ -264,7 +265,7 @@ private class PUIPlayerWindowOverlayView: NSView {
             removeTrackingArea(mouseTrackingArea)
         }
 
-        mouseTrackingArea = NSTrackingArea(rect: bounds, options: [NSTrackingArea.Options.inVisibleRect, NSTrackingArea.Options.mouseEnteredAndExited, NSTrackingArea.Options.mouseMoved, NSTrackingArea.Options.activeAlways], owner: self, userInfo: nil)
+        mouseTrackingArea = NSTrackingArea(rect: bounds, options: [.inVisibleRect, .mouseEnteredAndExited, .mouseMoved, .activeAlways], owner: self, userInfo: nil)
         addTrackingArea(mouseTrackingArea)
     }
 
@@ -276,7 +277,9 @@ private class PUIPlayerWindowOverlayView: NSView {
             mouseIdleTimer = nil
         }
 
-        mouseIdleTimer = Timer.scheduledTimer(timeInterval: 3.0, target: self, selector: #selector(mouseIdleTimerAction), userInfo: nil, repeats: false)
+        mouseIdleTimer = Timer.scheduledTimer(withTimeInterval: 3.0, repeats: false) { [weak self] in
+            self?.mouseIdleTimerAction($0)
+        }
     }
 
     @objc fileprivate func mouseIdleTimerAction(_ sender: Timer) {

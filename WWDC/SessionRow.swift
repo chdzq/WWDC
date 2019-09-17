@@ -7,29 +7,22 @@
 //
 
 import Foundation
-import IGListKit
 
 enum SessionRowKind {
     case sectionHeader(String)
     case session(SessionViewModel)
 }
 
-final class SessionRow: NSObject {
+final class SessionRow: CustomDebugStringConvertible {
 
     let kind: SessionRowKind
 
-    var _diffIdentifier: NSObjectProtocol
-
     init(viewModel: SessionViewModel) {
         kind = .session(viewModel)
-        _diffIdentifier = viewModel.diffIdentifier()
-
-        super.init()
     }
 
     init(title: String) {
         kind = .sectionHeader(title)
-        _diffIdentifier = title as NSObjectProtocol
     }
 
     convenience init(date: Date, showTimeZone: Bool = false) {
@@ -38,7 +31,7 @@ final class SessionRow: NSObject {
         self.init(title: title)
     }
 
-    override var debugDescription: String {
+    var debugDescription: String {
         switch kind {
         case .sectionHeader(let title):
             return "Header: " + title
@@ -46,36 +39,39 @@ final class SessionRow: NSObject {
             return "Session: " + viewModel.identifier + " " + viewModel.title
         }
     }
+}
 
-    // `hashValue` and `isEqual` both need to be provided to
-    // work correctly in sequences
-    override var hashValue: Int {
-        return diffIdentifier().hash
-    }
+extension SessionRow {
 
-    override func isEqual(_ object: Any?) -> Bool {
-        if let diffable = object as? IGListDiffable {
-            return diffIdentifier().isEqual(diffable.diffIdentifier())
-        } else {
-            return false
+    func represents(session: SessionIdentifiable) -> Bool {
+        if case .session(let viewModel) = kind {
+            return viewModel.identifier == session.sessionIdentifier
         }
+        return false
     }
 }
 
-extension SessionRow: IGListDiffable {
+extension SessionRow: Hashable {
 
-    func diffIdentifier() -> NSObjectProtocol {
-        return _diffIdentifier
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(String(reflecting: kind))
+        switch kind {
+        case let .sectionHeader(title):
+            hasher.combine(title)
+        case let .session(viewModel):
+            hasher.combine(viewModel.identifier)
+        }
     }
 
-    func isEqual(toDiffableObject object: IGListDiffable?) -> Bool {
-        guard let other = object as? SessionRow else { return false }
-
-        if case .session(let otherViewModel) = other.kind, case .session(let viewModel) = kind {
-            return otherViewModel.isEqual(toDiffableObject: viewModel)
-        } else if case .sectionHeader(let otherTitle) = other.kind, case .sectionHeader(let title) = kind {
-            return otherTitle == title
-        } else {
+    /// This definition of equality of 2 rows depends largely on the fact that
+    /// each view is bound to a realm object so there is no need to create a new row
+    static func == (lhs: SessionRow, rhs: SessionRow) -> Bool {
+        switch (lhs.kind, rhs.kind) {
+        case let (.sectionHeader(lhsTitle), .sectionHeader(rhsTitle)) where lhsTitle == rhsTitle:
+            return true
+        case let (.session(lhsViewModel), .session(rhsViewModel)) where lhsViewModel.identifier == rhsViewModel.identifier:
+            return true
+        default:
             return false
         }
     }
@@ -86,11 +82,11 @@ struct IndexedSessionRow: Hashable {
     let sessionRow: SessionRow
     let index: Int
 
-    var hashValue: Int {
-        return sessionRow.hashValue
+    func hash(into hasher: inout Hasher) {
+        hasher.combine(sessionRow)
     }
 
-    static func ==(lhs: IndexedSessionRow, rhs: IndexedSessionRow) -> Bool {
+    static func == (lhs: IndexedSessionRow, rhs: IndexedSessionRow) -> Bool {
         return lhs.sessionRow == rhs.sessionRow
     }
 }

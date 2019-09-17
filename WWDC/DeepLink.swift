@@ -39,7 +39,7 @@ struct DeepLink {
         let year: String
         let fullYear: String
 
-        if yearParameter.characters.count > 6 {
+        if yearParameter.count > 6 {
             year = String(yearParameter.suffix(4))
             fullYear = year
         } else {
@@ -49,7 +49,7 @@ struct DeepLink {
         }
 
         guard let yearNumber = Int(fullYear) else { return nil }
-        let currentYear = "\(Calendar.current.component(.year, from: Today()))"
+        let currentYear = "\(Calendar.current.component(.year, from: today()))"
         let currentYearDigits = String(currentYear[currentYear.index(currentYear.startIndex, offsetBy: 2)...])
 
         self.year = yearNumber

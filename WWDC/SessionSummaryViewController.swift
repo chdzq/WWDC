@@ -9,6 +9,7 @@
 import Cocoa
 import RxSwift
 import RxCocoa
+import ConfCore
 
 class SessionSummaryViewController: NSViewController {
 
@@ -32,10 +33,14 @@ class SessionSummaryViewController: NSViewController {
         let l = WWDCTextField(labelWithString: "")
         l.cell?.backgroundStyle = .dark
         l.lineBreakMode = .byWordWrapping
-        l.setContentCompressionResistancePriority(NSLayoutConstraint.Priority.defaultLow, for: .horizontal)
+        l.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         l.allowsDefaultTighteningForTruncation = true
         l.maximumNumberOfLines = 2
         l.translatesAutoresizingMaskIntoConstraints = false
+        l.isSelectable = true
+        // This prevents the text field from stripping attributes
+        // during selection. 
+        l.allowsEditingTextAttributes = true
 
         return l
     }()
@@ -49,6 +54,14 @@ class SessionSummaryViewController: NSViewController {
         return v
     }()
 
+    lazy var relatedSessionsViewController: RelatedSessionsViewController = {
+        let c = RelatedSessionsViewController()
+
+        c.title = "Related Sessions"
+
+        return c
+    }()
+
     private lazy var summaryLabel: WWDCTextField = {
         let l = WWDCTextField(labelWithString: "")
         l.font = .systemFont(ofSize: 18)
@@ -56,9 +69,9 @@ class SessionSummaryViewController: NSViewController {
         l.cell?.backgroundStyle = .dark
         l.isSelectable = true
         l.lineBreakMode = .byWordWrapping
-        l.setContentCompressionResistancePriority(NSLayoutConstraint.Priority.defaultLow, for: .horizontal)
+        l.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         l.allowsDefaultTighteningForTruncation = true
-        l.maximumNumberOfLines = 5
+        l.maximumNumberOfLines = 20
 
         return l
     }()
@@ -74,8 +87,31 @@ class SessionSummaryViewController: NSViewController {
         return l
     }()
 
+    private lazy var actionLinkLabel: ActionLabel = {
+        let l = ActionLabel(labelWithString: "")
+
+        l.font = .systemFont(ofSize: 16)
+        l.textColor = .primary
+        l.target = self
+        l.action = #selector(clickedActionLabel)
+
+        return l
+    }()
+
+    private lazy var contextStackView: NSStackView = {
+        let v = NSStackView(views: [self.contextLabel, self.actionLinkLabel])
+
+        v.orientation = .horizontal
+        v.alignment = .top
+        v.distribution = .fillProportionally
+        v.spacing = 16
+        v.translatesAutoresizingMaskIntoConstraints = false
+
+        return v
+    }()
+
     private lazy var stackView: NSStackView = {
-        let v = NSStackView(views: [self.summaryLabel, self.contextLabel])
+        let v = NSStackView(views: [self.summaryLabel, self.contextStackView])
 
         v.orientation = .vertical
         v.alignment = .leading
@@ -94,7 +130,7 @@ class SessionSummaryViewController: NSViewController {
         view.addSubview(actionsViewController.view)
         view.addSubview(stackView)
 
-        titleLabel.setContentHuggingPriority(NSLayoutConstraint.Priority.defaultLow, for: .horizontal)
+        titleLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
 
         actionsViewController.view.centerYAnchor.constraint(equalTo: titleLabel.centerYAnchor).isActive = true
         actionsViewController.view.trailingAnchor.constraint(equalTo: view.trailingAnchor).isActive = true
@@ -108,6 +144,13 @@ class SessionSummaryViewController: NSViewController {
         stackView.leadingAnchor.constraint(equalTo: view.leadingAnchor).isActive = true
         stackView.trailingAnchor.constraint(equalTo: view.trailingAnchor).isActive = true
         stackView.bottomAnchor.constraint(equalTo: view.bottomAnchor).isActive = true
+
+        addChild(relatedSessionsViewController)
+        relatedSessionsViewController.view.translatesAutoresizingMaskIntoConstraints = false
+        stackView.addArrangedSubview(relatedSessionsViewController.view)
+        relatedSessionsViewController.view.heightAnchor.constraint(equalToConstant: RelatedSessionsViewController.Metrics.height).isActive = true
+        relatedSessionsViewController.view.leadingAnchor.constraint(equalTo: stackView.leadingAnchor).isActive = true
+        relatedSessionsViewController.view.trailingAnchor.constraint(equalTo: stackView.trailingAnchor).isActive = true
     }
 
     override func viewDidLoad() {
@@ -129,6 +172,21 @@ class SessionSummaryViewController: NSViewController {
         }).disposed(by: disposeBag)
         viewModel.rxSummary.bind(to: summaryLabel.rx.text).disposed(by: disposeBag)
         viewModel.rxFooter.bind(to: contextLabel.rx.text).disposed(by: disposeBag)
+
+        viewModel.rxRelatedSessions.subscribe(onNext: { [weak self] relatedResources in
+            let relatedSessions = relatedResources.compactMap({ $0.session })
+            self?.relatedSessionsViewController.sessions = relatedSessions.compactMap(SessionViewModel.init)
+        }).disposed(by: disposeBag)
+
+        relatedSessionsViewController.scrollToBeginningOfDocument(nil)
+
+        viewModel.rxActionPrompt.bind(to: actionLinkLabel.rx.text).disposed(by: disposeBag)
+    }
+
+    @objc private func clickedActionLabel() {
+        guard let url = viewModel?.actionLinkURL else { return }
+
+        NSWorkspace.shared.open(url)
     }
 
 }

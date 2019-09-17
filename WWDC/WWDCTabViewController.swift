@@ -10,10 +10,6 @@ import Cocoa
 import RxSwift
 import RxCocoa
 
-extension Notification.Name {
-    static let WWDCTabViewControllerDidFinishLoading = Notification.Name("WWDCTabViewControllerDidFinishLoading")
-}
-
 class WWDCTabViewController<Tab: RawRepresentable>: NSTabViewController where Tab.RawValue == Int {
 
     var activeTab: Tab {
@@ -31,70 +27,14 @@ class WWDCTabViewController<Tab: RawRepresentable>: NSTabViewController where Ta
         return activeTabVar.asObservable()
     }
 
-    init(windowController: NSWindowController) {
-        super.init(nibName: nil, bundle: nil)
-
-        // Preserve the window's size, essentially passing in saved window frame sizes
-        let superFrame = view.frame
-        if let windowFrame = windowController.window?.frame {
-            view.frame = NSRect(origin: superFrame.origin, size: windowFrame.size)
-        }
-
-        identifier = NSUserInterfaceItemIdentifier(rawValue: "tabs")
-    }
-
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-
-    override func viewDidLoad() {
-        super.viewDidLoad()
-
-        transitionOptions = [NSViewController.TransitionOptions.allowUserInteraction]
-
-        tabStyle = .toolbar
-        view.wantsLayer = true
-    }
-
-    private var sentStatupNotification = false
-
-    private var isConfigured = false
-
-    override func viewDidAppear() {
-        super.viewDidAppear()
-
-        configureIfNeeded()
-    }
-
-    private func configureIfNeeded() {
-        guard !isConfigured else { return }
-
-        guard let toolbar = view.window?.toolbar else { return }
-
-        isConfigured = true
-
-        toolbar.insertItem(withItemIdentifier: NSToolbarItem.Identifier.flexibleSpace, at: 0)
-        toolbar.insertItem(withItemIdentifier: NSToolbarItem.Identifier.flexibleSpace, at: toolbar.items.count)
-
-        addObserver(self, forKeyPath: #keyPath(selectedTabViewItemIndex), options: [.initial, .new], context: nil)
-
-        if !sentStatupNotification {
-            sentStatupNotification = true
-            NotificationCenter.default.post(name: .WWDCTabViewControllerDidFinishLoading, object: self)
-        }
-    }
-
-    deinit {
-        removeObserver(self, forKeyPath: #keyPath(selectedTabViewItemIndex))
-    }
-
-    override func observeValue(forKeyPath keyPath: String?, of object: Any?, change: [NSKeyValueChangeKey : Any]?, context: UnsafeMutableRawPointer?) {
-        if keyPath == #keyPath(selectedTabViewItemIndex) {
+    override var selectedTabViewItemIndex: Int {
+        didSet {
+            guard selectedTabViewItemIndex != oldValue else { return }
             guard selectedTabViewItemIndex >= 0 && selectedTabViewItemIndex < tabViewItems.count else { return }
 
             tabViewItems.forEach { item in
                 guard let identifier = item.viewController?.identifier else { return }
-                guard let view = tabItemViews.first(where: { $0.controllerIdentifier == identifier.rawValue }) else { return }
+                guard let view = tabBar.items.first(where: { $0.controllerIdentifier == identifier.rawValue }) else { return }
 
                 if indexForChild(with: identifier.rawValue) == selectedTabViewItemIndex {
                     view.state = .on
@@ -104,51 +44,90 @@ class WWDCTabViewController<Tab: RawRepresentable>: NSTabViewController where Ta
             }
 
             activeTabVar.value = Tab(rawValue: selectedTabViewItemIndex)!
-        } else {
-            super.observeValue(forKeyPath: keyPath, of: object, change: change, context: context)
         }
     }
 
-    private func tabItem(with identifier: String) -> NSTabViewItem? {
-        return tabViewItems.first { $0.identifier as? String == identifier }
+    private(set) lazy var tabBar = WWDCTabViewControllerTabBar()
+
+    init(windowController: WWDCWindowController) {
+        super.init(nibName: nil, bundle: nil)
+
+        windowController.titleBarViewController.tabBar = tabBar
+
+        // Preserve the window's size, essentially passing in saved window frame sizes
+        let superFrame = view.frame
+        if let windowFrame = windowController.window?.frame {
+            view.frame = NSRect(origin: superFrame.origin, size: windowFrame.size)
+        }
+
+        tabStyle = .unspecified
+        identifier = NSUserInterfaceItemIdentifier(rawValue: "tabs")
     }
 
-    override func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier itemIdentifier: NSToolbarItem.Identifier, willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
-        guard let tabItem = tabItem(with: itemIdentifier.rawValue) else { return nil }
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func addTabViewItem(_ tabViewItem: NSTabViewItem) {
+        super.addTabViewItem(tabViewItem)
 
         let itemView = TabItemView(frame: .zero)
 
-        itemView.title = tabItem.label
-        itemView.controllerIdentifier = (tabItem.viewController?.identifier).map { $0.rawValue } ?? ""
-        itemView.image = NSImage(named: NSImage.Name(rawValue: itemView.controllerIdentifier.lowercased()))
-        itemView.alternateImage = NSImage(named: NSImage.Name(rawValue: itemView.controllerIdentifier.lowercased() + "-filled"))
+        itemView.title = tabViewItem.label
+        itemView.controllerIdentifier = (tabViewItem.viewController?.identifier).map { $0.rawValue } ?? ""
+        itemView.image = NSImage(named: itemView.controllerIdentifier.lowercased())
+        itemView.alternateImage = NSImage(named: itemView.controllerIdentifier.lowercased() + "-filled")
+        itemView.sizeToFit()
 
-        let item = NSToolbarItem(itemIdentifier: itemIdentifier)
+        itemView.target = self
+        itemView.action = #selector(changeTab)
 
-        item.minSize = itemView.bounds.size
-        item.maxSize = itemView.bounds.size
-        item.view = itemView
+        itemView.state = (tabViewItems.firstIndex(of: tabViewItem) == selectedTabViewItemIndex) ? .on : .off
 
-        item.target = self
-        item.action = #selector(changeTab)
-
-        itemView.state = (tabViewItems.index(of: tabItem) == selectedTabViewItemIndex) ? .on : .off
-
-        return item
+        tabBar.addItem(itemView)
     }
 
-    @objc private func changeTab(_ sender: TabItemView) {
+    var isTopConstraintAdded = false
+
+    override func  updateViewConstraints() {
+        super.updateViewConstraints()
+
+        // The top constraint keeps the tabView from extending
+        // under the title bar
+        if !isTopConstraintAdded, let window = view.window {
+            isTopConstraintAdded = true
+            NSLayoutConstraint(item: tabView,
+                               attribute: .top,
+                               relatedBy: .equal,
+                               toItem: window.contentLayoutGuide,
+                               attribute: .top,
+                               multiplier: 1,
+                               constant: 0).isActive = true
+        }
+    }
+
+    override func transition(from fromViewController: NSViewController, to toViewController: NSViewController, options: NSViewController.TransitionOptions = [], completionHandler completion: (() -> Void)? = nil) {
+
+        // Disable the crossfade animation here instead of removing it from the transition options
+        // This works around a bug in NSSearchField in which the animation of resigning first responder
+        // would get stuck if you switched tabs while the search field was first responder. Upon returning
+        // to the original tab, you would see the search field's placeholder animate back to center
+        // search_field_responder_tag
+        NSAnimationContext.runAnimationGroup({ context in
+            context.duration = 0
+            super.transition(from: fromViewController, to: toViewController, options: options, completionHandler: completion)
+        })
+    }
+
+    @objc
+    private func changeTab(_ sender: TabItemView) {
         guard let index = indexForChild(with: sender.controllerIdentifier) else { return }
 
         selectedTabViewItemIndex = index
     }
 
     private func indexForChild(with identifier: String) -> Int? {
-        return tabViewItems.index { $0.viewController?.identifier?.rawValue == identifier }
-    }
-
-    private var tabItemViews: [TabItemView] {
-        return view.window?.toolbar?.items.flatMap { $0.view as? TabItemView } ?? []
+        return tabViewItems.firstIndex { $0.viewController?.identifier?.rawValue == identifier }
     }
 
     private var loadingView: ModalLoadingView?

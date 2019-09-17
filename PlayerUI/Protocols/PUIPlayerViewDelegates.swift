@@ -8,12 +8,17 @@
 
 import Cocoa
 
+public enum PUIPiPExitReason {
+    case returnButton, exitButton
+}
+
 public protocol PUIPlayerViewDelegate: class {
 
     func playerViewWillEnterPictureInPictureMode(_ playerView: PUIPlayerView)
-    func playerViewWillExitPictureInPictureMode(_ playerView: PUIPlayerView, isReturningFromPiP: Bool)
+    func playerViewWillExitPictureInPictureMode(_ playerView: PUIPlayerView, reason: PUIPiPExitReason)
     func playerViewDidSelectAddAnnotation(_ playerView: PUIPlayerView, at timestamp: Double)
     func playerViewDidSelectToggleFullScreen(_ playerView: PUIPlayerView)
+    func playerViewDidSelectLike(_ playerView: PUIPlayerView)
 
 }
 
@@ -28,6 +33,6 @@ public protocol PUIPlayerViewAppearanceDelegate: class {
     func playerViewShouldShowTimestampLabels(_ playerView: PUIPlayerView) -> Bool
     func playerViewShouldShowExternalPlaybackControls(_ playerView: PUIPlayerView) -> Bool
     func playerViewShouldShowFullScreenButton(_ playerView: PUIPlayerView) -> Bool
-    func PlayerViewShouldShowBackAndForward30SecondsButtons(_ playerView: PUIPlayerView) -> Bool
+    func playerViewShouldShowBackAndForward30SecondsButtons(_ playerView: PUIPlayerView) -> Bool
 
 }

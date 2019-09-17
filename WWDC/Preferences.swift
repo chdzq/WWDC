@@ -14,6 +14,7 @@ extension Notification.Name {
     static let LocalVideoStoragePathPreferenceDidChange = Notification.Name("LocalVideoStoragePathPreferenceDidChange")
     static let RefreshPeriodicallyPreferenceDidChange = Notification.Name("RefreshPeriodicallyPreferenceDidChange")
     static let SkipBackAndForwardBy30SecondsPreferenceDidChange = Notification.Name("SkipBackAndForwardBy30SecondsPreferenceDidChange")
+    static let SyncUserDataPreferencesDidChange = Notification.Name("SyncUserDataPreferencesDidChange")
 }
 
 final class Preferences {
@@ -135,8 +136,19 @@ final class Preferences {
         }
         set {
             defaults.set(newValue, forKey: #function)
-            
+
             NotificationCenter.default.post(name: .SkipBackAndForwardBy30SecondsPreferenceDidChange, object: nil)
+        }
+    }
+
+    var syncUserData: Bool {
+        get {
+            return defaults.bool(forKey: #function)
+        }
+        set {
+            defaults.set(newValue, forKey: #function)
+
+            NotificationCenter.default.post(name: .SyncUserDataPreferencesDidChange, object: nil)
         }
     }
 

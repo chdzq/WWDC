@@ -11,15 +11,15 @@ import RealmSwift
 import RxSwift
 import ConfCore
 import PlayerUI
+import EventKit
+import os.log
 
 extension AppCoordinator: SessionActionsViewControllerDelegate {
 
     func sessionActionsDidSelectCancelDownload(_ sender: NSView?) {
         guard let viewModel = selectedViewModelRegardlessOfTab else { return }
 
-        guard let url = viewModel.session.assets.filter("rawAssetType == %@", SessionAssetType.hdVideo.rawValue).first?.remoteURL else { return }
-
-        _ = DownloadManager.shared.cancelDownload(url)
+        DownloadManager.shared.cancelDownloads([viewModel.session])
     }
 
     func sessionActionsDidSelectFavorite(_ sender: NSView?) {
@@ -35,7 +35,7 @@ extension AppCoordinator: SessionActionsViewControllerDelegate {
     func sessionActionsDidSelectSlides(_ sender: NSView?) {
         guard let viewModel = selectedViewModelRegardlessOfTab else { return }
 
-        guard let slidesAsset = viewModel.session.asset(of: .slides) else { return }
+        guard let slidesAsset = viewModel.session.asset(ofType: .slides) else { return }
 
         guard let url = URL(string: slidesAsset.remoteURL) else { return }
 
@@ -45,15 +45,11 @@ extension AppCoordinator: SessionActionsViewControllerDelegate {
     func sessionActionsDidSelectDownload(_ sender: NSView?) {
         guard let viewModel = selectedViewModelRegardlessOfTab else { return }
 
-        guard let videoAsset = viewModel.session.assets.filter("rawAssetType == %@", SessionAssetType.hdVideo.rawValue).first else { return }
-
-        DownloadManager.shared.download(videoAsset)
+        DownloadManager.shared.download([viewModel.session])
     }
 
     func sessionActionsDidSelectDeleteDownload(_ sender: NSView?) {
         guard let viewModel = selectedViewModelRegardlessOfTab else { return }
-
-        guard let videoAsset = viewModel.session.assets.filter("rawAssetType == %@", SessionAssetType.hdVideo.rawValue).first else { return }
 
         let alert = WWDCAlert.create()
 
@@ -72,9 +68,90 @@ extension AppCoordinator: SessionActionsViewControllerDelegate {
 
         switch choice {
         case .yes:
-            DownloadManager.shared.deleteDownload(for: videoAsset)
+            DownloadManager.shared.deleteDownloadedFile(for: viewModel.session)
         case .no:
             break
+        }
+    }
+
+    @objc func sessionActionsDidSelectCalendar(_ sender: NSView?) {
+        guard let viewModel = selectedViewModelRegardlessOfTab else { return }
+
+        let status = EKEventStore.authorizationStatus(for: .event)
+        let eventStore = EKEventStore()
+
+        switch status {
+        case .notDetermined, .denied, .restricted:
+            eventStore.requestAccess(to: .event) { hasAccess, _ in
+                guard hasAccess else { return }
+
+                DispatchQueue.main.async {
+                    self.saveCalendarEvent(viewModel: viewModel, eventStore: eventStore)
+                }
+            }
+        case .authorized:
+            self.saveCalendarEvent(viewModel: viewModel, eventStore: eventStore)
+        @unknown default:
+            assertionFailure("An unexpected case was discovered on an non-frozen obj-c enum")
+            os_log("Cannot determine EKEventStore authorization status due to an unknown enum case. Doing nothing instead",
+                   log: self.log,
+                   type: .error)
+        }
+    }
+
+    private func saveCalendarEvent(viewModel: SessionViewModel, eventStore: EKEventStore) {
+        let event = EKEvent(eventStore: eventStore)
+
+        if let storedEvent = eventStore.event(withIdentifier: viewModel.sessionInstance.calendarEventIdentifier) {
+            let alert = WWDCAlert.create()
+
+            alert.messageText = "You've already scheduled this session"
+            alert.informativeText = "Would you like to remove it from your calendar?"
+
+            alert.addButton(withTitle: "Remove")
+            alert.addButton(withTitle: "Cancel")
+            alert.window.center()
+
+            enum Choice: NSApplication.ModalResponse.RawValue {
+                case removeCalender = 1000
+                case cancel = 1001
+            }
+
+            guard let choice = Choice(rawValue: alert.runModal().rawValue) else { return }
+
+            switch choice {
+            case .removeCalender:
+                do {
+                    try eventStore.remove(storedEvent, span: .thisEvent, commit: true)
+                } catch let error as NSError {
+                    os_log("Failed to remove event from calender: %{public}@",
+                           log: self.log,
+                           type: .error,
+                           String(describing: error))
+                }
+            default:
+                break
+            }
+
+            return
+        }
+
+        event.startDate = viewModel.sessionInstance.startTime
+        event.endDate = viewModel.sessionInstance.endTime
+        event.title = viewModel.session.title
+        event.location = viewModel.sessionInstance.roomName
+        event.url = viewModel.webUrl
+        event.calendar = eventStore.defaultCalendarForNewEvents
+
+        storage.modify(viewModel.sessionInstance) { $0.calendarEventIdentifier = event.eventIdentifier }
+
+        do {
+            try eventStore.save(event, span: .thisEvent, commit: true)
+        } catch {
+            os_log("Failed to add event to calendar: %{public}@",
+                   log: self.log,
+                   type: .error,
+                   String(describing: error))
         }
     }
 
@@ -82,11 +159,42 @@ extension AppCoordinator: SessionActionsViewControllerDelegate {
         guard let sender = sender else { return }
         guard let viewModel = selectedViewModelRegardlessOfTab else { return }
 
-        guard let webpageAsset = viewModel.session.assets.filter("rawAssetType == %@", SessionAssetType.webpage.rawValue).first else { return }
+        guard let webpageAsset = viewModel.session.asset(ofType: .webpage) else { return }
 
         guard let url = URL(string: webpageAsset.remoteURL) else { return }
 
         let picker = NSSharingServicePicker(items: [url])
+        picker.delegate = PickerDelegate.shared
         picker.show(relativeTo: .zero, of: sender, preferredEdge: .minY)
+    }
+}
+
+final class PickerDelegate: NSObject, NSSharingServicePickerDelegate {
+
+    static let shared = PickerDelegate()
+
+    func sharingServicePicker(_ sharingServicePicker: NSSharingServicePicker, sharingServicesForItems items: [Any], proposedSharingServices proposedServices: [NSSharingService]) -> [NSSharingService] {
+
+        let copyService = NSSharingService(title: "Copy URL", image: #imageLiteral(resourceName: "copy"), alternateImage: nil) {
+
+            if let url = items.first as? URL {
+
+                NSPasteboard.general.clearContents()
+                if !NSPasteboard.general.setString(url.absoluteString, forType: .string) {
+                    os_log("Failed to copy URL",
+                           log: .default,
+                           type: .error)
+                }
+            } else {
+                os_log("Sharing expects a URL and did not receive one",
+                       log: .default,
+                       type: .error)
+            }
+        }
+
+        var proposedServices = proposedServices
+        proposedServices.insert(copyService, at: 0)
+
+        return proposedServices
     }
 }

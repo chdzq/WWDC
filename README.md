@@ -22,9 +22,9 @@ Watch this year's videos as they're released and access videos from previous yea
 - Fullscreen and native picture-in-picture support
 - Navigate video contents easily with the help of transcripts
 
-## ChromeCast
+## Chromecast
 
-You can watch WWDC videos (both live and on-demand) on your ChromeCast. Just click the ChromeCast button while playing a video, choose your device from the list and control playback using the Google Home app on your phone.
+You can watch WWDC videos (both live and on-demand) on your Chromecast. Just click the Chromecast button while playing a video, choose your device from the list and control playback using the Google Home app on your phone.
 
 ![chromecast](./screenshots/v5/ChromeCast.png)
 
@@ -36,15 +36,22 @@ With bookmarks, you can create a reference point within a video and add an annot
 
 ![bookmarks](./screenshots/v5/Video-Bookmark.png)
 
+## iCloud Sync
+
+With version 6.0, you can try out our new iCloud sync feature. Enable the feature in preferences and your favorites, bookmarks and progress in sessions will be synced accross all your Macs.
+
 ## Sharing
 
 You can easily share links to sessions or videos by using the share button. The links shared are for Apple's developer website, but the app can open these links if you drag them into the icon (or if you use [BrowserFreedom](https://getbrowserfreedom.com)).
 
-## *COMING SOON:* Syncing and bookmark sharing
-
-With the latest version of the app you can already begin creating an account (if you have iCloud set up on your device). In future versions, your account will be used to sync your favorites and bookmarks across your Macs and to share your bookmarks with other users of the app.
-
 ## Nerdy bits 🤓
+
+### Code of Conduct
+We expect all of our contributors to help uphold the values set out in our [code of conduct](./CODE_OF_CONDUCT.md). We fundamentally believe this will help us build a better community, and with it a better app.
+
+### Contributing
+
+Please read the [contribution guidelines](CONTRIBUTING.md) before opening an issue or pull request.
 
 ### External libraries
 
@@ -52,9 +59,9 @@ A number of third-party libraries are used by the app:
 
 - [Realm](https://realm.io): data storage and caching
 - [Sparkle](https://sparkle-project.org/): automatic updates
+- [CloudKitCodable](https://github.com/insidegui/CloudKitCodable): sync support
 - [Fabric](https://fabric.io): crash reporting and error logging
 - [Siesta](http://bustoutsolutions.github.io/siesta/): networking
-- [SwiftyJSON](https://github.com/SwiftyJSON/SwiftyJSON): JSON parsing
 - [RxSwift](https://github.com/ReactiveX/RxSwift): reactive extensions
 - [RxRealm](https://github.com/RxSwiftCommunity/RxRealm): reactive extensions for Realm
 
@@ -63,11 +70,10 @@ A number of third-party libraries are used by the app:
 - **ConfCore** is the core of the app that deals with Apple's WWDC API, data storage, caching, syncing and transcripts (everything that has to do with data, basically)
 - **PlayerUI** contains the UI components for the video player and some general-purpose UI components used throughout the app
 - **ThrowBack** provides support for migration of user data and preferences from old versions of the app
-- **CommunitySupport** manages your account information with iCloud and will be used for the bookmark sharing functionality in the future
 
 ## Building the app
 
-**Building requires Xcode 9 or later.**
+**Building requires Xcode 10.2 or later.**
 
 Building the app requires [Carthage](https://github.com/Carthage/Carthage) to be installed.
 

@@ -12,9 +12,11 @@ import RxSwift
 import ConfCore
 import PlayerUI
 import ThrowBack
+import os.log
 
 final class AppCoordinator {
 
+    let log = OSLog(subsystem: "WWDC", category: "AppCoordinator")
     private let disposeBag = DisposeBag()
 
     var liveObserver: LiveObserver
@@ -25,6 +27,7 @@ final class AppCoordinator {
     var windowController: MainWindowController
     var tabController: WWDCTabViewController<MainWindowTab>
 
+    var featuredController: FeaturedContentViewController
     var scheduleController: SessionsSplitViewController
     var videosController: SessionsSplitViewController
 
@@ -35,74 +38,98 @@ final class AppCoordinator {
     var activeTab: MainWindowTab = .schedule
 
     /// The tab that "owns" the current player (the one that was active when the "play" button was pressed)
-    var playerOwnerTab: MainWindowTab? = nil
+    var playerOwnerTab: MainWindowTab?
 
     /// The session that "owns" the current player (the one that was selected on the active tab when "play" was pressed)
-    var playerOwnerSessionIdentifier: String? = nil
-
-    /// Whether playback can be restored to the previous context when exiting PiP mode (go back to tab/session)
-    var canRestorePlaybackContext = false
+    var playerOwnerSessionIdentifier: String? {
+        didSet { rxPlayerOwnerSessionIdentifier.onNext(playerOwnerSessionIdentifier) }
+    }
+    var rxPlayerOwnerSessionIdentifier = BehaviorSubject<String?>(value: nil)
 
     /// Whether we're currently in the middle of a player context transition
     var isTransitioningPlayerContext = false
 
     init(windowController: MainWindowController) {
-        let filePath = PathUtil.appSupportPath + "/ConfCore.realm"
-
-        var realmConfig = Realm.Configuration(fileURL: URL(fileURLWithPath: filePath))
-        realmConfig.schemaVersion = Constants.coreSchemaVersion
-
-        let client = AppleAPIClient(environment: .current)
-
         do {
+            let supportPath = try PathUtil.appSupportPathCreatingIfNeeded()
+
+            let filePath = supportPath + "/ConfCore.realm"
+
+            var realmConfig = Realm.Configuration(fileURL: URL(fileURLWithPath: filePath))
+            realmConfig.schemaVersion = Constants.coreSchemaVersion
+
+            let client = AppleAPIClient(environment: .current)
+
             storage = try Storage(realmConfig)
 
             syncEngine = SyncEngine(storage: storage, client: client)
+            #if ICLOUD
+            syncEngine.userDataSyncEngine.isEnabled = Preferences.shared.syncUserData
+            #endif
         } catch {
             fatalError("Realm initialization error: \(error)")
         }
 
         DownloadManager.shared.start(with: storage)
 
+        windowController.titleBarViewController.statusViewController = DownloadsStatusViewController(downloadManager: DownloadManager.shared, storage: storage)
+
+        liveObserver = LiveObserver(dateProvider: today, storage: storage, syncEngine: syncEngine)
+
+        // Primary UI Intialization
+
         tabController = WWDCTabViewController(windowController: windowController)
+
+        // Featured
+        featuredController = FeaturedContentViewController()
+        featuredController.identifier = NSUserInterfaceItemIdentifier(rawValue: "Featured")
+        let featuredItem = NSTabViewItem(viewController: featuredController)
+        featuredItem.label = "Featured"
+        tabController.addTabViewItem(featuredItem)
 
         // Schedule
         scheduleController = SessionsSplitViewController(windowController: windowController, listStyle: .schedule)
         scheduleController.identifier = NSUserInterfaceItemIdentifier(rawValue: "Schedule")
         scheduleController.splitView.identifier = NSUserInterfaceItemIdentifier(rawValue: "ScheduleSplitView")
-        scheduleController.splitView.autosaveName = NSSplitView.AutosaveName(rawValue: "ScheduleSplitView")
+        scheduleController.splitView.autosaveName = "ScheduleSplitView"
         let scheduleItem = NSTabViewItem(viewController: scheduleController)
         scheduleItem.label = "Schedule"
+        scheduleItem.initialFirstResponder = scheduleController.listViewController.tableView
         tabController.addTabViewItem(scheduleItem)
 
         // Videos
         videosController = SessionsSplitViewController(windowController: windowController, listStyle: .videos)
         videosController.identifier = NSUserInterfaceItemIdentifier(rawValue: "Videos")
         videosController.splitView.identifier = NSUserInterfaceItemIdentifier(rawValue: "VideosSplitView")
-        videosController.splitView.autosaveName = NSSplitView.AutosaveName(rawValue: "VideosSplitView")
+        videosController.splitView.autosaveName = "VideosSplitView"
         let videosItem = NSTabViewItem(viewController: videosController)
         videosItem.label = "Videos"
+        videosItem.initialFirstResponder = videosController.listViewController.tableView
         tabController.addTabViewItem(videosItem)
 
         self.windowController = windowController
 
-        liveObserver = LiveObserver(dateProvider: Today, storage: storage)
+        restoreApplicationState()
 
         setupBindings()
         setupDelegation()
 
-        NotificationCenter.default.addObserver(forName: .WWDCTabViewControllerDidFinishLoading, object: nil, queue: nil) { _ in self.restoreApplicationState() }
-        NotificationCenter.default.addObserver(forName: NSApplication.didFinishLaunchingNotification, object: nil, queue: nil) { _ in self.startup() }
-        NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: nil) { _ in self.saveApplicationState() }
+        _ = NotificationCenter.default.addObserver(forName: NSApplication.didFinishLaunchingNotification, object: nil, queue: nil) { _ in self.startup() }
+        _ = NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: nil) { _ in self.saveApplicationState() }
+        _ = NotificationCenter.default.addObserver(forName: .RefreshPeriodicallyPreferenceDidChange, object: nil, queue: nil, using: { _  in self.resetAutorefreshTimer() })
+
+        NSApp.isAutomaticCustomizeTouchBarMenuItemEnabled = true
     }
 
     /// The list controller for the active tab
-    var currentListController: SessionsTableViewController {
+    var currentListController: SessionsTableViewController? {
         switch activeTab {
         case .schedule:
             return scheduleController.listViewController
         case .videos:
             return videosController.listViewController
+        default:
+            return nil
         }
     }
 
@@ -130,24 +157,36 @@ final class AppCoordinator {
     var selectedViewModelRegardlessOfTab: SessionViewModel?
 
     /// The viewModel for the current playback session
-    var currentPlaybackViewModel: PlaybackViewModel?
+    var currentPlaybackViewModel: PlaybackViewModel? {
+        didSet {
+            observeNowPlayingInfo()
+        }
+    }
 
     private func setupBindings() {
         tabController.rxActiveTab.subscribe(onNext: { [weak self] activeTab in
+
             self?.activeTab = activeTab
 
             self?.updateSelectedViewModelRegardlessOfTab()
         }).disposed(by: disposeBag)
 
-        selectedSession.subscribeOn(MainScheduler.instance).subscribe(onNext: { [weak self] viewModel in
-            self?.videosController.detailViewController.viewModel = viewModel
-            self?.updateSelectedViewModelRegardlessOfTab()
-        }).disposed(by: disposeBag)
+        func bind(session: Observable<SessionViewModel?>, to detailsController: SessionDetailsViewController) {
 
-        selectedScheduleItem.subscribeOn(MainScheduler.instance).subscribe(onNext: { [weak self] viewModel in
-            self?.scheduleController.detailViewController.viewModel = viewModel
-            self?.updateSelectedViewModelRegardlessOfTab()
-        }).disposed(by: disposeBag)
+            session.subscribeOn(MainScheduler.instance).subscribe(onNext: { [weak self] viewModel in
+                NSAnimationContext.runAnimationGroup({ context in
+                    context.duration = 0.35
+
+                    detailsController.viewModel = viewModel
+                    self?.updateSelectedViewModelRegardlessOfTab()
+                })
+
+            }).disposed(by: disposeBag)
+        }
+
+        bind(session: selectedSession, to: videosController.detailViewController)
+
+        bind(session: selectedScheduleItem, to: scheduleController.detailViewController)
     }
 
     private func updateSelectedViewModelRegardlessOfTab() {
@@ -156,10 +195,29 @@ final class AppCoordinator {
             selectedViewModelRegardlessOfTab = selectedScheduleItemValue
         case .videos:
             selectedViewModelRegardlessOfTab = selectedSessionValue
+        default:
+            selectedViewModelRegardlessOfTab = nil
         }
 
         updateShelfBasedOnSelectionChange()
         updateCurrentActivity(with: selectedViewModelRegardlessOfTab)
+    }
+
+    func selectSessionOnAppropriateTab(with viewModel: SessionViewModel) {
+
+        if currentListController?.canDisplay(session: viewModel) == true {
+            currentListController?.select(session: viewModel)
+            return
+        }
+
+        if videosController.listViewController.canDisplay(session: viewModel) {
+            videosController.listViewController.select(session: viewModel)
+            tabController.activeTab = .videos
+
+        } else if scheduleController.listViewController.canDisplay(session: viewModel) {
+            scheduleController.listViewController.select(session: viewModel)
+            tabController.activeTab = .schedule
+        }
     }
 
     private func setupDelegation() {
@@ -167,14 +225,18 @@ final class AppCoordinator {
 
         videoDetail.shelfController.delegate = self
         videoDetail.summaryController.actionsViewController.delegate = self
+        videoDetail.summaryController.relatedSessionsViewController.delegate = self
 
         let scheduleDetail = scheduleController.detailViewController
 
         scheduleDetail.shelfController.delegate = self
         scheduleDetail.summaryController.actionsViewController.delegate = self
-        
+        scheduleDetail.summaryController.relatedSessionsViewController.delegate = self
+
         videosController.listViewController.delegate = self
         scheduleController.listViewController.delegate = self
+
+        featuredController.delegate = self
     }
 
     private func updateListsAfterSync(migrate: Bool = false) {
@@ -191,27 +253,46 @@ final class AppCoordinator {
     }
 
     private func doUpdateLists() {
-        if !storage.isEmpty {
-            tabController.hideLoading()
-        }
 
-        storage.tracksObservable
-            .take(1)
-            .subscribe(onNext: { [weak self] tracks in
-                self?.videosController.listViewController.tracks = tracks
-            }).disposed(by: disposeBag)
+        // Initial app launch waits for all of these things to be loaded before dismissing the primary loading spinner
+        // It may, however, delay the presentation of content on tabs that already have everything they need
 
-        storage.scheduleObservable
+        let starupDependencies = Observable.combineLatest(storage.tracksObservable,
+                                                          storage.eventsObservable,
+                                                          storage.focusesObservable,
+                                                          storage.scheduleObservable,
+                                                          storage.featuredSectionsObservable)
+
+        starupDependencies
+            .filter {
+                !$0.0.isEmpty && !$0.1.isEmpty && !$0.2.isEmpty && !$0.3.isEmpty && !$0.4.isEmpty
+            }
             .take(1)
-            .subscribe(onNext: { [weak self] sections in
-                self?.scheduleController.listViewController.scheduleSections = sections
+            .subscribe(onNext: { [weak self] tracks, _, _, sections, _ in
+                guard let self = self else { return }
+
+                self.tabController.hideLoading()
+                self.searchCoordinator.configureFilters()
+
+                self.videosController.listViewController.sessionRowProvider = VideosSessionRowProvider(tracks: tracks)
+
+                self.scheduleController.listViewController.sessionRowProvider = ScheduleSessionRowProvider(scheduleSections: sections)
+                self.scrollToTodayIfWWDC()
             }).disposed(by: disposeBag)
 
         liveObserver.start()
+    }
 
-        restoreListStatesIfNeeded()
+    private func updateFeaturedSectionsAfterSync() {
 
-        setupSearch()
+        storage
+            .featuredSectionsObservable
+            .filter { !$0.isEmpty }
+            .subscribeOn(MainScheduler.instance)
+            .take(1)
+            .subscribe(onNext: { [weak self] sections in
+                self?.featuredController.sections = sections.map { FeaturedSectionViewModel(section: $0) }
+            }).disposed(by: disposeBag)
     }
 
     private lazy var searchCoordinator: SearchCoordinator = {
@@ -221,19 +302,7 @@ final class AppCoordinator {
                                  restorationFiltersState: Preferences.shared.filtersState)
     }()
 
-    private func setupSearch() {
-        searchCoordinator.configureFilters()
-    }
-
-    @IBAction func refresh(_ sender: Any?) {
-        syncEngine.syncContent()
-        syncEngine.syncLiveVideos()
-        liveObserver.refresh()
-
-        resetAutorefreshTimer()
-    }
-
-    func startup() {
+    private func startup() {
         RemoteEnvironment.shared.start()
 
         ContributorsFetcher.shared.load()
@@ -245,20 +314,39 @@ final class AppCoordinator {
             tabController.showLoading()
         }
 
-        NotificationCenter.default.addObserver(forName: .SyncEngineDidSyncSessionsAndSchedule, object: nil, queue: OperationQueue.main) { note in
-            if let error = note.object as? Error {
-                NSApp.presentError(error)
+        func checkSyncEngineOperationSucceededAndShowError(note: Notification) -> Bool {
+            if let error = note.object as? APIError {
+                switch error {
+                case .adapter, .unknown:
+                    WWDCAlert.show(with: error)
+                case .http:()
+                }
+            } else if let error = note.object as? Error {
+                WWDCAlert.show(with: error)
             } else {
-                self.updateListsAfterSync(migrate: true)
+                return true
             }
+
+            return false
         }
 
-        NotificationCenter.default.addObserver(forName: .WWDCEnvironmentDidChange, object: nil, queue: OperationQueue.main) { _ in
+        _ = NotificationCenter.default.addObserver(forName: .SyncEngineDidSyncSessionsAndSchedule, object: nil, queue: .main) { note in
+            guard checkSyncEngineOperationSucceededAndShowError(note: note) else { return }
+            self.updateListsAfterSync(migrate: true)
+        }
+
+        _ = NotificationCenter.default.addObserver(forName: .SyncEngineDidSyncFeaturedSections, object: nil, queue: .main) { note in
+            guard checkSyncEngineOperationSucceededAndShowError(note: note) else { return }
+            self.updateFeaturedSectionsAfterSync()
+        }
+
+        _ = NotificationCenter.default.addObserver(forName: .WWDCEnvironmentDidChange, object: nil, queue: .main) { _ in
             self.refresh(nil)
         }
 
         refresh(nil)
         updateListsAfterSync()
+        updateFeaturedSectionsAfterSync()
 
         if Arguments.showPreferences {
             showPreferences(nil)
@@ -277,16 +365,33 @@ final class AppCoordinator {
         showAccountPreferences()
     }
 
-    func receiveNotification(with userInfo: [String : Any]) -> Bool {
-        return liveObserver.processSubscriptionNotification(with: userInfo) ||
+    @discardableResult func receiveNotification(with userInfo: [String: Any]) -> Bool {
+        let userDataSyncEngineHandled: Bool
+
+        #if ICLOUD
+        userDataSyncEngineHandled = syncEngine.userDataSyncEngine.processSubscriptionNotification(with: userInfo)
+        #else
+        userDataSyncEngineHandled = false
+        #endif
+
+        return userDataSyncEngineHandled ||
+            liveObserver.processSubscriptionNotification(with: userInfo) ||
             RemoteEnvironment.shared.processSubscriptionNotification(with: userInfo)
     }
 
+    // MARK: - Now playing info
+
+    private var nowPlayingInfoBag = DisposeBag()
+
+    private func observeNowPlayingInfo() {
+        nowPlayingInfoBag = DisposeBag()
+
+        currentPlaybackViewModel?.nowPlayingInfo.asObservable().subscribe(onNext: { [weak self] _ in
+            self?.publishNowPlayingInfo()
+        }).disposed(by: nowPlayingInfoBag)
+    }
+
     // MARK: - State restoration
-
-    private var didRestoreLists = false
-
-    private var deferredLink: DeepLink?
 
     private func saveApplicationState() {
         Preferences.shared.activeTab = activeTab
@@ -296,63 +401,51 @@ final class AppCoordinator {
     }
 
     private func restoreApplicationState() {
-        tabController.activeTab = Preferences.shared.activeTab
-    }
 
-    private func restoreListStatesIfNeeded() {
-        defer { didRestoreLists = true }
+        let activeTab = Preferences.shared.activeTab
+        tabController.activeTab = activeTab
 
-        if let link = deferredLink {
-            return handle(link: link)
-        }
-
-        guard !didRestoreLists else { return }
-
-        if !scrollToToday() {
-            if let identifier = Preferences.shared.selectedScheduleItemIdentifier {
-                scheduleController.listViewController.selectSession(with: identifier)
-            }
+        if let identifier = Preferences.shared.selectedScheduleItemIdentifier {
+            scheduleController.listViewController.select(session: SessionIdentifier(identifier))
         }
 
         if let identifier = Preferences.shared.selectedVideoItemIdentifier {
-            videosController.listViewController.selectSession(with: identifier)
+            videosController.listViewController.select(session: SessionIdentifier(identifier))
         }
     }
 
-    private func scrollToToday() -> Bool {
-        guard liveObserver.isWWDCWeek else { return false }
+    private func scrollToTodayIfWWDC() {
+        guard liveObserver.isWWDCWeek else { return }
 
         scheduleController.listViewController.scrollToToday()
-
-        return true
     }
 
     // MARK: - Deep linking
 
-    func handle(link: DeepLink) {
-        guard didRestoreLists else {
-            deferredLink = link
-            return
-        }
+    func handle(link: DeepLink, deferIfNeeded: Bool) {
 
         if link.isForCurrentYear {
             tabController.activeTab = .schedule
-            scheduleController.listViewController.selectSession(with: link.sessionIdentifier)
+            scheduleController.listViewController.select(session: SessionIdentifier(link.sessionIdentifier))
         } else {
             tabController.activeTab = .videos
-            videosController.listViewController.selectSession(with: link.sessionIdentifier)
+            videosController.listViewController.select(session: SessionIdentifier(link.sessionIdentifier))
         }
     }
 
     // MARK: - Preferences
 
-    private lazy var preferencesCoordinator: PreferencesCoordinator = PreferencesCoordinator()
+    private lazy var preferencesCoordinator = PreferencesCoordinator()
 
     func showAccountPreferences() {
         preferencesCoordinator.show(in: .account)
     }
 
     func showPreferences(_ sender: Any?) {
+        #if ICLOUD
+        preferencesCoordinator.userDataSyncEngine = syncEngine.userDataSyncEngine
+        #endif
+
         preferencesCoordinator.show()
     }
 
@@ -372,20 +465,60 @@ final class AppCoordinator {
         aboutWindowController.showWindow(nil)
     }
 
-    // MARK: - Autorefresh
+    func showFeatured() {
+        tabController.activeTab = .featured
+    }
 
-    private var autorefreshTimer: Timer!
+    func showSchedule() {
+        tabController.activeTab = .schedule
+    }
 
-    private func resetAutorefreshTimer() {
-        if autorefreshTimer != nil {
-            autorefreshTimer.invalidate()
-            autorefreshTimer = nil
+    func showVideos() {
+        tabController.activeTab = .videos
+    }
+
+    // MARK: - Refresh
+
+    /// Used to prevent the refresh system from being spammed. Resetting
+    /// NSBackgroundActivitySchedule can result in the scheduled activity happening immediately
+    /// especially if the `interval` is sufficiently low.
+    private var lastRefresh = Date.distantPast
+
+    func refresh(_ sender: Any?) {
+        let now = Date()
+        guard now.timeIntervalSince(lastRefresh) > 5 else { return }
+        lastRefresh = now
+
+        DispatchQueue.main.async {
+            self.syncEngine.syncContent()
+
+            self.liveObserver.refresh()
+
+            if self.autorefreshActivity == nil
+                || (sender as? NSBackgroundActivityScheduler) !== self.autorefreshActivity {
+                self.resetAutorefreshTimer()
+            }
+        }
+    }
+
+    private var autorefreshActivity: NSBackgroundActivityScheduler?
+
+    func makeAutorefreshActivity() -> NSBackgroundActivityScheduler {
+        let activityScheduler = NSBackgroundActivityScheduler(identifier: "io.wwdc.autorefresh.backgroundactivity")
+        activityScheduler.interval = Constants.autorefreshInterval
+        activityScheduler.repeats = true
+        activityScheduler.qualityOfService = .utility
+        activityScheduler.schedule { [weak self] completion in
+            self?.refresh(self?.autorefreshActivity)
+            completion(.finished)
         }
 
-        guard Preferences.shared.refreshPeriodically else { return }
+        return activityScheduler
+    }
 
-        autorefreshTimer = Timer.scheduledTimer(timeInterval: Constants.autorefreshInterval, target: self, selector: #selector(refresh), userInfo: nil, repeats: false)
-        autorefreshTimer.tolerance = Constants.autorefreshInterval / 3
+    private func resetAutorefreshTimer() {
+        autorefreshActivity?.invalidate()
+        autorefreshActivity = Preferences.shared.refreshPeriodically ? makeAutorefreshActivity() : nil
     }
 
     // MARK: - Data migration
@@ -406,7 +539,7 @@ final class AppCoordinator {
 
         if migrator != nil { guard !migrator.isPerformingMigration else { return } }
 
-        let legacyURL = URL(fileURLWithPath: PathUtil.appSupportPath + "/default.realm")
+        let legacyURL = URL(fileURLWithPath: PathUtil.appSupportPathAssumingExisting + "/default.realm")
         migrator = TBUserDataMigrator(legacyDatabaseFileURL: legacyURL, newRealm: storage.realm)
 
         guard migrator.needsMigration && !TBUserDataMigrator.presentedMigrationPrompt else {

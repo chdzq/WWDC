@@ -9,8 +9,9 @@
 import Foundation
 import CloudKit
 import ConfCore
+import os.log
 
-final class RemoteEnvironment: NSObject {
+final class RemoteEnvironment {
 
     private struct Constants {
         static let environmentRecordType = "Environment"
@@ -23,6 +24,8 @@ final class RemoteEnvironment: NSObject {
     }()
 
     static let shared: RemoteEnvironment = RemoteEnvironment()
+
+    private let log = OSLog(subsystem: "WWDC", category: "RemoteEnvironment")
 
     func start() {
         #if ICLOUD
@@ -41,7 +44,7 @@ final class RemoteEnvironment: NSObject {
 
             operation.recordFetchedBlock = { record in
                 guard let env = Environment(record) else {
-                    NSLog("Error parsing remote environment")
+                    os_log("Error parsing remote environment", log: self.log, type: .error)
                     return
                 }
 
@@ -50,7 +53,10 @@ final class RemoteEnvironment: NSObject {
 
             operation.queryCompletionBlock = { [unowned self] _, error in
                 if let error = error {
-                    NSLog("Error fetching remote environment: \(error)")
+                    os_log("Error fetching remote environment: %{public}@",
+                           log: self.log,
+                           type: .error,
+                           String(describing: error))
 
                     DispatchQueue.main.asyncAfter(deadline: .now() + 10) { self.fetch() }
                 }
@@ -71,7 +77,7 @@ final class RemoteEnvironment: NSObject {
     }
 
     private func doCreateSubscription() {
-        let options: CKQuerySubscriptionOptions = [.firesOnRecordCreation, .firesOnRecordUpdate, .firesOnRecordDeletion]
+        let options: CKQuerySubscription.Options = [.firesOnRecordCreation, .firesOnRecordUpdate, .firesOnRecordDeletion]
         let subscription = CKQuerySubscription(recordType: Constants.environmentRecordType,
                                                predicate: NSPredicate(value: true),
                                                subscriptionID: environmentSubscriptionID,
@@ -79,16 +85,21 @@ final class RemoteEnvironment: NSObject {
 
         database.save(subscription) { _, error in
             if let error = error {
-                NSLog("[RemoteEnvironment] Error creating subscription: \(error)")
+                os_log("Error creating remote environment subscription: %{public}@",
+                       log: self.log,
+                       type: .error,
+                       String(describing: error))
+            } else {
+                os_log("Remote environment subscription created", log: self.log, type: .info)
             }
         }
     }
 
-    func processSubscriptionNotification(with userInfo: [String : Any]) -> Bool {
+    func processSubscriptionNotification(with userInfo: [String: Any]) -> Bool {
         let notification = CKNotification(fromRemoteNotificationDictionary: userInfo)
 
         // check if the remote notification is for us, if not, tell the caller that we haven't handled it
-        guard notification.subscriptionID == environmentSubscriptionID else { return false }
+        guard notification?.subscriptionID == environmentSubscriptionID else { return false }
 
         // notification for environment change
         fetch()
@@ -103,11 +114,12 @@ extension Environment {
     init?(_ record: CKRecord) {
         guard let baseURLStr = record["baseURL"] as? String, URL(string: baseURLStr) != nil else { return nil }
 
-        baseURL = baseURLStr
-        videosPath = "/videos.json"
-        liveVideosPath = "/videos_live.json"
-        newsPath = "/news.json"
-        sessionsPath = "/sessions.json"
+        self.init(baseURL: baseURLStr,
+                  videosPath: "/videos.json",
+                  sessionsPath: "/sessions.json",
+                  newsPath: "/news.json",
+                  liveVideosPath: "/videos_live.json",
+                  featuredSectionsPath: "/_featured.json")
     }
 
 }

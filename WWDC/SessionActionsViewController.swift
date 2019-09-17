@@ -17,6 +17,7 @@ protocol SessionActionsViewControllerDelegate: class {
     func sessionActionsDidSelectSlides(_ sender: NSView?)
     func sessionActionsDidSelectFavorite(_ sender: NSView?)
     func sessionActionsDidSelectDownload(_ sender: NSView?)
+    func sessionActionsDidSelectCalendar(_ sender: NSView?)
     func sessionActionsDidSelectDeleteDownload(_ sender: NSView?)
     func sessionActionsDidSelectCancelDownload(_ sender: NSView?)
     func sessionActionsDidSelectShare(_ sender: NSView?)
@@ -79,14 +80,22 @@ class SessionActionsViewController: NSViewController {
         return b
     }()
 
-    private lazy var downloadIndicator: NSProgressIndicator = {
-        let pi = NSProgressIndicator(frame: NSRect(x: 0, y: 0, width: 24, height: 24))
+    private lazy var calendarButton: PUIButton = {
+        let b = PUIButton(frame: .zero)
 
-        pi.style = .spinning
+        b.image = #imageLiteral(resourceName: "calendar")
+        b.target = self
+        b.action = #selector(addCalendar(_:))
+        b.shouldAlwaysDrawHighlighted = true
+        b.toolTip = "Add to Calendar"
+
+        return b
+    }()
+
+    private lazy var downloadIndicator: WWDCProgressIndicator = {
+        let pi = WWDCProgressIndicator(frame: NSRect(x: 0, y: 0, width: 24, height: 24))
+
         pi.isIndeterminate = false
-        pi.minValue = 0
-        pi.maxValue = 1
-        pi.doubleValue = 0
         pi.translatesAutoresizingMaskIntoConstraints = false
         pi.widthAnchor.constraint(equalToConstant: 24).isActive = true
         pi.heightAnchor.constraint(equalToConstant: 24).isActive = true
@@ -116,7 +125,8 @@ class SessionActionsViewController: NSViewController {
             self.favoriteButton,
             self.downloadButton,
             self.downloadIndicator,
-            self.shareButton
+            self.shareButton,
+            self.calendarButton
             ])
 
         v.orientation = .horizontal
@@ -132,7 +142,7 @@ class SessionActionsViewController: NSViewController {
         view.wantsLayer = true
         view.translatesAutoresizingMaskIntoConstraints = false
 
-        view.setContentHuggingPriority(NSLayoutConstraint.Priority.defaultHigh, for: .horizontal)
+        view.setContentHuggingPriority(.defaultHigh, for: .horizontal)
     }
 
     override func viewDidLoad() {
@@ -146,7 +156,8 @@ class SessionActionsViewController: NSViewController {
 
         guard let viewModel = viewModel else { return }
 
-        slidesButton.isHidden = (viewModel.session.asset(of: .slides) == nil)
+        slidesButton.isHidden = (viewModel.session.asset(ofType: .slides) == nil)
+        calendarButton.isHidden = (viewModel.sessionInstance.startTime < today())
 
         viewModel.rxIsFavorite.subscribe(onNext: { [weak self] isFavorite in
             self?.favoriteButton.state = isFavorite ? .on : .off
@@ -161,18 +172,25 @@ class SessionActionsViewController: NSViewController {
         if let rxDownloadState = DownloadManager.shared.downloadStatusObservable(for: viewModel.session) {
             rxDownloadState.throttle(0.8, scheduler: MainScheduler.instance).subscribe(onNext: { [weak self] status in
                 switch status {
-                case .downloading(let progress):
+                case .downloading(let info):
                     self?.downloadIndicator.isHidden = false
                     self?.downloadButton.isHidden = true
 
-                    if progress < 0 {
+                    if info.progress < 0 {
                         self?.downloadIndicator.isIndeterminate = true
-                        self?.downloadIndicator.startAnimation(nil)
+                        self?.downloadIndicator.startAnimating()
                     } else {
                         self?.downloadIndicator.isIndeterminate = false
-                        self?.downloadIndicator.doubleValue = progress
+                        self?.downloadIndicator.progress = Float(info.progress)
                     }
-                case .paused, .cancelled, .none, .failed:
+
+                case .failed:
+                    let alert = WWDCAlert.create()
+                    alert.messageText = "Download Failed!"
+                    alert.informativeText = "An error occurred while attempting to download \"\(viewModel.title)\"."
+                    alert.runModal()
+                    fallthrough
+                case .paused, .cancelled, .none:
                     self?.resetDownloadButton()
                     self?.downloadIndicator.isHidden = true
                     self?.downloadButton.isHidden = false
@@ -209,10 +227,14 @@ class SessionActionsViewController: NSViewController {
     @IBAction func download(_ sender: NSView?) {
         downloadButton.isHidden = true
         downloadIndicator.isIndeterminate = true
-        downloadIndicator.startAnimation(nil)
+        downloadIndicator.startAnimating()
         downloadIndicator.isHidden = false
 
         delegate?.sessionActionsDidSelectDownload(sender)
+    }
+
+    @IBAction func addCalendar(_ sender: NSView?) {
+        delegate?.sessionActionsDidSelectCalendar(sender)
     }
 
     @IBAction func deleteDownload(_ sender: NSView?) {

@@ -8,8 +8,11 @@
 
 import Cocoa
 import AVFoundation
+import os.log
 
 public final class PUIPlayerView: NSView {
+
+    private let log = OSLog(subsystem: "PlayerUI", category: "PUIPlayerView")
 
     // MARK: - Public API
 
@@ -29,6 +32,8 @@ public final class PUIPlayerView: NSView {
             } else {
                 externalStatusController.view.isHidden = true
             }
+
+            invalidateTouchBar()
         }
     }
 
@@ -100,6 +105,12 @@ public final class PUIPlayerView: NSView {
         fatalError("init(coder:) has not been implemented")
     }
 
+    public var nowPlayingInfo: PUINowPlayingInfo? {
+        didSet {
+            nowPlayingCoordinator?.basicNowPlayingInfo = nowPlayingInfo
+        }
+    }
+
     public var isPlaying: Bool {
         if let externalProvider = currentExternalPlaybackProvider {
             return !externalProvider.status.rate.isZero
@@ -133,15 +144,7 @@ public final class PUIPlayerView: NSView {
     }
 
     public func seek(to annotation: PUITimelineAnnotation) {
-        guard let player = player else { return }
-
-        let time = CMTimeMakeWithSeconds(Float64(annotation.timestamp), 9000)
-
-        if isPlayingExternally {
-            currentExternalPlaybackProvider?.seek(to: annotation.timestamp)
-        } else {
-            player.seek(to: time)
-        }
+        seek(to: annotation.timestamp)
     }
 
     public var playbackSpeed: PUIPlaybackSpeed = .normal {
@@ -155,6 +158,8 @@ public final class PUIPlayerView: NSView {
 
             updatePlaybackSpeedState()
             updateSelectedMenuItem(forPlaybackSpeed: playbackSpeed)
+
+            invalidateTouchBar()
         }
     }
 
@@ -180,7 +185,7 @@ public final class PUIPlayerView: NSView {
     public func registerExternalPlaybackProvider(_ provider: PUIExternalPlaybackProvider.Type) {
         // prevent registering the same provider multiple times
         guard !externalPlaybackProviders.contains(where: { type(of: $0.provider).name == provider.name }) else {
-            NSLog("PUIPlayerView WARNING: tried to register provider \(provider.name) which was already registered")
+            os_log("Tried to register provider %{public}@ which was already registered", log: log, type: .error, provider.name)
             return
         }
 
@@ -197,7 +202,7 @@ public final class PUIPlayerView: NSView {
 
     // MARK: - Private API
 
-    fileprivate var lastKnownWindow: NSWindow? = nil
+    fileprivate weak var lastKnownWindow: NSWindow?
 
     private var sortedAnnotations: [PUITimelineAnnotation] = [] {
         didSet {
@@ -214,16 +219,20 @@ public final class PUIPlayerView: NSView {
     private var playerLayer = PUIBoringPlayerLayer()
 
     private func setupPlayer() {
+        elapsedTimeLabel.stringValue = elapsedTimeInitialValue
+        remainingTimeLabel.stringValue = remainingTimeInitialValue
+        timelineView.resetUI()
+
         guard let player = player else { return }
 
         playerLayer.player = player
-        playerLayer.videoGravity = AVLayerVideoGravity.resizeAspect
+        playerLayer.videoGravity = .resizeAspect
 
         if pictureContainer == nil {
             pictureContainer = PUIPictureContainerViewController(playerLayer: playerLayer)
             pictureContainer.delegate = self
             pictureContainer.view.frame = bounds
-            pictureContainer.view.autoresizingMask = [NSView.AutoresizingMask.width, NSView.AutoresizingMask.height]
+            pictureContainer.view.autoresizingMask = [.width, .height]
 
             addSubview(pictureContainer.view)
         }
@@ -233,14 +242,22 @@ public final class PUIPlayerView: NSView {
         player.addObserver(self, forKeyPath: #keyPath(AVPlayer.rate), options: [.initial, .new], context: nil)
         player.addObserver(self, forKeyPath: #keyPath(AVPlayer.currentItem), options: [.initial, .new], context: nil)
         player.addObserver(self, forKeyPath: #keyPath(AVPlayer.currentItem.loadedTimeRanges), options: [.initial, .new], context: nil)
-        player.addObserver(self, forKeyPath: #keyPath(AVPlayer.currentItem.duration), options: [.initial, .new], context: nil)
-        player.addObserver(self, forKeyPath: #keyPath(AVPlayer.currentItem.currentMediaSelection), options: [.initial, .new], context: nil)
 
-        asset?.loadValuesAsynchronously(forKeys: ["tracks"], completionHandler: metadataBecameAvailable)
+        asset?.loadValuesAsynchronously(forKeys: ["duration"], completionHandler: durationBecameAvailable)
 
-        playerTimeObserver = player.addPeriodicTimeObserver(forInterval: CMTimeMakeWithSeconds(0.5, 9000), queue: DispatchQueue.main) { [weak self] currentTime in
+        asset?.loadValuesAsynchronously(forKeys: ["availableMediaCharacteristicsWithMediaSelectionOptions"], completionHandler: { [weak self] in
+
+            if self?.asset?.statusOfValue(forKey: "availableMediaCharacteristicsWithMediaSelectionOptions", error: nil) == .loaded {
+                DispatchQueue.main.async { self?.updateSubtitleSelectionMenu() }
+            }
+        })
+
+        playerTimeObserver = player.addPeriodicTimeObserver(forInterval: CMTimeMakeWithSeconds(0.5, preferredTimescale: 9000), queue: .main) { [weak self] currentTime in
             self?.playerTimeDidChange(time: currentTime)
         }
+
+        setupNowPlayingCoordinatorIfSupported()
+        setupRemoteCommandCoordinator()
     }
 
     private func teardown(player oldValue: AVPlayer) {
@@ -256,12 +273,10 @@ public final class PUIPlayerView: NSView {
         oldValue.removeObserver(self, forKeyPath: #keyPath(AVPlayer.rate))
         oldValue.removeObserver(self, forKeyPath: #keyPath(AVPlayer.volume))
         oldValue.removeObserver(self, forKeyPath: #keyPath(AVPlayer.currentItem.loadedTimeRanges))
-        oldValue.removeObserver(self, forKeyPath: #keyPath(AVPlayer.currentItem.duration))
-        oldValue.removeObserver(self, forKeyPath: #keyPath(AVPlayer.currentItem.currentMediaSelection))
         oldValue.removeObserver(self, forKeyPath: #keyPath(AVPlayer.currentItem))
     }
 
-    public override func observeValue(forKeyPath keyPath: String?, of object: Any?, change: [NSKeyValueChangeKey : Any]?, context: UnsafeMutableRawPointer?) {
+    public override func observeValue(forKeyPath keyPath: String?, of object: Any?, change: [NSKeyValueChangeKey: Any]?, context: UnsafeMutableRawPointer?) {
         DispatchQueue.main.async {
             guard let keyPath = keyPath else { return }
 
@@ -275,13 +290,9 @@ public final class PUIPlayerView: NSView {
             case #keyPath(AVPlayer.rate):
                 self.updatePlayingState()
                 self.updatePowerAssertion()
-            case #keyPath(AVPlayer.currentItem.duration):
-                self.metadataBecameAvailable()
-            case #keyPath(AVPlayer.currentItem.currentMediaSelection):
-                self.updateMediaSelection()
             case #keyPath(AVPlayer.currentItem):
                 if let playerItem = self.player?.currentItem {
-                    playerItem.audioTimePitchAlgorithm = AVAudioTimePitchAlgorithm.timeDomain
+                    playerItem.audioTimePitchAlgorithm = .timeDomain
                 }
             default:
                 super.observeValue(forKeyPath: keyPath, of: object, change: change, context: context)
@@ -358,7 +369,7 @@ public final class PUIPlayerView: NSView {
     }
 
     fileprivate var currentPresentationSize: NSSize? {
-        guard let size = player?.currentItem?.presentationSize, size != NSZeroSize else { return nil }
+        guard let size = player?.currentItem?.presentationSize, size != NSSize.zero else { return nil }
 
         return size
     }
@@ -373,11 +384,10 @@ public final class PUIPlayerView: NSView {
         }
     }
 
-    private func metadataBecameAvailable() {
+    private func durationBecameAvailable() {
         guard let duration = asset?.duration else { return }
 
         DispatchQueue.main.async {
-
             self.timelineView.mediaDuration = Double(CMTimeGetSeconds(duration))
         }
     }
@@ -385,10 +395,9 @@ public final class PUIPlayerView: NSView {
     fileprivate func playerTimeDidChange(time: CMTime) {
         guard let player = player else { return }
         guard player.hasValidMediaDuration else { return }
-        guard let duration = asset?.duration else { return }
+        guard let duration = asset?.durationIfLoaded else { return }
 
         DispatchQueue.main.async {
-
             let progress = Double(CMTimeGetSeconds(time) / CMTimeGetSeconds(duration))
             self.timelineView.playbackProgress = progress
 
@@ -401,7 +410,7 @@ public final class PUIPlayerView: NSView {
         guard let player = player else { return }
 
         guard player.hasValidMediaDuration else { return }
-        guard let duration = asset?.duration else { return }
+        guard let duration = asset?.durationIfLoaded else { return }
 
         let time = player.currentTime()
 
@@ -417,13 +426,61 @@ public final class PUIPlayerView: NSView {
         }
     }
 
+    // MARK: - Now Playing Coordination
+
+    private var nowPlayingCoordinator: PUINowPlayingInfoCoordinator?
+
+    private func setupNowPlayingCoordinatorIfSupported() {
+        guard let player = player else { return }
+
+        nowPlayingCoordinator = PUINowPlayingInfoCoordinator(player: player)
+        nowPlayingCoordinator?.basicNowPlayingInfo = nowPlayingInfo
+    }
+
+    // MARK: - Remote command support (AirPlay 2)
+
+    private var remoteCommandCoordinator: PUIRemoteCommandCoordinator?
+
+    private func setupRemoteCommandCoordinator() {
+        remoteCommandCoordinator = PUIRemoteCommandCoordinator()
+
+        remoteCommandCoordinator?.pauseHandler = { [weak self] in
+            self?.pause(nil)
+        }
+        remoteCommandCoordinator?.playHandler = { [weak self] in
+            self?.play(nil)
+        }
+        remoteCommandCoordinator?.stopHandler = { [weak self] in
+            self?.pause(nil)
+        }
+        remoteCommandCoordinator?.togglePlayingHandler = { [weak self] in
+            self?.togglePlaying(nil)
+        }
+        remoteCommandCoordinator?.nextTrackHandler = { [weak self] in
+            self?.goForwardInTime(nil)
+        }
+        remoteCommandCoordinator?.previousTrackHandler = { [weak self] in
+            self?.goBackInTime(nil)
+        }
+        remoteCommandCoordinator?.likeHandler = { [weak self] in
+            guard let self = self else { return }
+
+            self.delegate?.playerViewDidSelectLike(self)
+        }
+        remoteCommandCoordinator?.changePlaybackPositionHandler = { [weak self] time in
+            self?.seek(to: time)
+        }
+        remoteCommandCoordinator?.changePlaybackRateHandler = { [weak self] speed in
+            self?.playbackSpeed = speed
+        }
+    }
+
     // MARK: Controls
 
     fileprivate var wasPlayingBeforeStartingInteractiveSeek = false
 
     private var extrasMenuContainerView: NSStackView!
 
-    //    fileprivate var controlsVisualEffectView: NSVisualEffectView!
     fileprivate var scrimContainerView: PUIScrimContainerView!
 
     private var timeLabelsContainerView: NSStackView!
@@ -431,35 +488,43 @@ public final class PUIPlayerView: NSView {
     private var volumeControlsContainerView: NSStackView!
     private var centerButtonsContainerView: NSStackView!
 
-    fileprivate var timelineView: PUITimelineView!
+    fileprivate lazy var timelineView: PUITimelineView = {
+        let v = PUITimelineView(frame: .zero)
 
+        v.viewDelegate = self
+
+        return v
+    }()
+
+    private var elapsedTimeInitialValue = "00:00:00"
     private lazy var elapsedTimeLabel: NSTextField = {
-        let l = NSTextField(labelWithString: "00:00:00")
+        let l = NSTextField(labelWithString: elapsedTimeInitialValue)
 
         l.alignment = .left
-        l.font = .systemFont(ofSize: 14, weight: NSFont.Weight.medium)
+        l.font = .monospacedDigitSystemFont(ofSize: 14, weight: .medium)
         l.textColor = .timeLabel
 
         return l
     }()
 
+    private var remainingTimeInitialValue = "-00:00:00"
     private lazy var remainingTimeLabel: NSTextField = {
-        let l = NSTextField(labelWithString: "-00:00:00")
+        let l = NSTextField(labelWithString: remainingTimeInitialValue)
 
         l.alignment = .right
-        l.font = .systemFont(ofSize: 14, weight: NSFont.Weight.medium)
+        l.font = .monospacedDigitSystemFont(ofSize: 14, weight: .medium)
         l.textColor = .timeLabel
 
         return l
     }()
 
-    private lazy var fullScreenButton: PUIButton = {
-        let b = PUIButton(frame: .zero)
+    private lazy var fullScreenButton: PUIVibrantButton = {
+        let b = PUIVibrantButton(frame: .zero)
 
-        b.image = .PUIFullScreen
-        b.target = self
-        b.action = #selector(toggleFullscreen)
-        b.toolTip = "Toggle full screen"
+        b.button.image = .PUIFullScreen
+        b.button.target = self
+        b.button.action = #selector(toggleFullscreen)
+        b.button.toolTip = "Toggle full screen"
 
         return b
     }()
@@ -514,7 +579,7 @@ public final class PUIPlayerView: NSView {
     private lazy var previousAnnotationButton: PUIButton = {
         let b = PUIButton(frame: .zero)
 
-        b.image = .PUIPreviousBookmark
+        b.image = .PUIPreviousAnnotation
         b.target = self
         b.action = #selector(previousAnnotation)
         b.toolTip = "Go to previous bookmark"
@@ -525,7 +590,7 @@ public final class PUIPlayerView: NSView {
     private lazy var nextAnnotationButton: PUIButton = {
         let b = PUIButton(frame: .zero)
 
-        b.image = .PUINextBookmark
+        b.image = .PUINextAnnotation
         b.target = self
         b.action = #selector(nextAnnotation)
         b.toolTip = "Go to next bookmark"
@@ -571,7 +636,7 @@ public final class PUIPlayerView: NSView {
     private lazy var addAnnotationButton: PUIButton = {
         let b = PUIButton(frame: .zero)
 
-        b.image = .PUIBookmark
+        b.image = .PUIAnnotation
         b.target = self
         b.action = #selector(addAnnotation)
         b.toolTip = "Add bookmark"
@@ -604,15 +669,6 @@ public final class PUIPlayerView: NSView {
         externalStatusController.view.topAnchor.constraint(equalTo: topAnchor).isActive = true
         externalStatusController.view.bottomAnchor.constraint(equalTo: bottomAnchor).isActive = true
 
-        //        // VFX view
-        //        controlsVisualEffectView = NSVisualEffectView(frame: bounds)
-        //        controlsVisualEffectView.translatesAutoresizingMaskIntoConstraints = false
-        //        controlsVisualEffectView.material = .ultraDark
-        //        controlsVisualEffectView.appearance = NSAppearance(named: NSAppearanceNameVibrantDark)
-        //        controlsVisualEffectView.blendingMode = .withinWindow
-        //        controlsVisualEffectView.wantsLayer = true
-        //        controlsVisualEffectView.layer?.masksToBounds = false
-        //        controlsVisualEffectView.state = .active
         scrimContainerView = PUIScrimContainerView(frame: bounds)
 
         // Time labels
@@ -620,10 +676,6 @@ public final class PUIPlayerView: NSView {
         timeLabelsContainerView.distribution = .fillEqually
         timeLabelsContainerView.orientation = .horizontal
         timeLabelsContainerView.alignment = .centerY
-
-        // Timeline view
-        timelineView = PUITimelineView(frame: .zero)
-        timelineView.viewDelegate = self
 
         // Volume controls
         volumeControlsContainerView = NSStackView(views: [volumeButton, volumeSlider])
@@ -636,9 +688,9 @@ public final class PUIPlayerView: NSView {
         centerButtonsContainerView = NSStackView(frame: bounds)
 
         // Leading controls (volume, subtitles)
-        centerButtonsContainerView.addView(volumeButton, in: NSStackView.Gravity.leading)
-        centerButtonsContainerView.addView(volumeSlider, in: NSStackView.Gravity.leading)
-        centerButtonsContainerView.addView(subtitlesButton, in: NSStackView.Gravity.leading)
+        centerButtonsContainerView.addView(volumeButton, in: .leading)
+        centerButtonsContainerView.addView(volumeSlider, in: .leading)
+        centerButtonsContainerView.addView(subtitlesButton, in: .leading)
 
         centerButtonsContainerView.setCustomSpacing(6, after: volumeButton)
 
@@ -650,9 +702,9 @@ public final class PUIPlayerView: NSView {
         centerButtonsContainerView.addView(forwardButton, in: .center)
 
         // Trailing controls (speed, add annotation, pip)
-        centerButtonsContainerView.addView(speedButton, in: NSStackView.Gravity.trailing)
-        centerButtonsContainerView.addView(addAnnotationButton, in: NSStackView.Gravity.trailing)
-        centerButtonsContainerView.addView(pipButton, in: NSStackView.Gravity.trailing)
+        centerButtonsContainerView.addView(speedButton, in: .trailing)
+        centerButtonsContainerView.addView(addAnnotationButton, in: .trailing)
+        centerButtonsContainerView.addView(pipButton, in: .trailing)
 
         centerButtonsContainerView.orientation = .horizontal
         centerButtonsContainerView.spacing = 24
@@ -660,18 +712,18 @@ public final class PUIPlayerView: NSView {
         centerButtonsContainerView.alignment = .centerY
 
         // Visibility priorities
-        centerButtonsContainerView.setVisibilityPriority(NSStackView.VisibilityPriority.detachOnlyIfNecessary, for: volumeButton)
-        centerButtonsContainerView.setVisibilityPriority(NSStackView.VisibilityPriority.detachOnlyIfNecessary, for: volumeSlider)
-        centerButtonsContainerView.setVisibilityPriority(NSStackView.VisibilityPriority.detachOnlyIfNecessary, for: subtitlesButton)
-        centerButtonsContainerView.setVisibilityPriority(NSStackView.VisibilityPriority.detachOnlyIfNecessary, for: backButton)
-        centerButtonsContainerView.setVisibilityPriority(NSStackView.VisibilityPriority.detachOnlyIfNecessary, for: previousAnnotationButton)
-        centerButtonsContainerView.setVisibilityPriority(NSStackView.VisibilityPriority.mustHold, for: playButton)
-        centerButtonsContainerView.setVisibilityPriority(NSStackView.VisibilityPriority.detachOnlyIfNecessary, for: forwardButton)
-        centerButtonsContainerView.setVisibilityPriority(NSStackView.VisibilityPriority.detachOnlyIfNecessary, for: nextAnnotationButton)
-        centerButtonsContainerView.setVisibilityPriority(NSStackView.VisibilityPriority.detachOnlyIfNecessary, for: speedButton)
-        centerButtonsContainerView.setVisibilityPriority(NSStackView.VisibilityPriority.detachOnlyIfNecessary, for: addAnnotationButton)
-        centerButtonsContainerView.setVisibilityPriority(NSStackView.VisibilityPriority.detachOnlyIfNecessary, for: pipButton)
-        centerButtonsContainerView.setContentCompressionResistancePriority(NSLayoutConstraint.Priority.defaultLow, for: .horizontal)
+        centerButtonsContainerView.setVisibilityPriority(.detachOnlyIfNecessary, for: volumeButton)
+        centerButtonsContainerView.setVisibilityPriority(.detachOnlyIfNecessary, for: volumeSlider)
+        centerButtonsContainerView.setVisibilityPriority(.detachOnlyIfNecessary, for: subtitlesButton)
+        centerButtonsContainerView.setVisibilityPriority(.detachOnlyIfNecessary, for: backButton)
+        centerButtonsContainerView.setVisibilityPriority(.detachOnlyIfNecessary, for: previousAnnotationButton)
+        centerButtonsContainerView.setVisibilityPriority(.mustHold, for: playButton)
+        centerButtonsContainerView.setVisibilityPriority(.detachOnlyIfNecessary, for: forwardButton)
+        centerButtonsContainerView.setVisibilityPriority(.detachOnlyIfNecessary, for: nextAnnotationButton)
+        centerButtonsContainerView.setVisibilityPriority(.detachOnlyIfNecessary, for: speedButton)
+        centerButtonsContainerView.setVisibilityPriority(.detachOnlyIfNecessary, for: addAnnotationButton)
+        centerButtonsContainerView.setVisibilityPriority(.detachOnlyIfNecessary, for: pipButton)
+        centerButtonsContainerView.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
         // Main stack view
         controlsContainerView = NSStackView(views: [
@@ -720,6 +772,28 @@ public final class PUIPlayerView: NSView {
         updateExtrasMenuPosition()
     }
 
+    var isConfiguredForBackAndForward30s = false {
+        didSet {
+            invalidateTouchBar()
+        }
+    }
+
+    var goBackInTimeImage: NSImage {
+        return isConfiguredForBackAndForward30s ? .PUIBack30s : .PUIBack15s
+    }
+
+    var goBackInTimeDescription: String {
+        return isConfiguredForBackAndForward30s ? "Go back 30s" : "Go back 15s"
+    }
+
+    var goForwardInTimeImage: NSImage {
+        return isConfiguredForBackAndForward30s ? .PUIForward30s : .PUIForward15s
+    }
+
+    var goForwardInTimeDescription: String {
+        return isConfiguredForBackAndForward30s ? "Go forward 30s" : "Go forward 15s"
+    }
+
     private func configureWithAppearanceFromDelegate() {
         guard let d = appearanceDelegate else { return }
 
@@ -736,13 +810,13 @@ public final class PUIPlayerView: NSView {
         backButton.isHidden = disableBackAndForward
         forwardButton.isHidden = disableBackAndForward
 
-        let skipBy30 = d.PlayerViewShouldShowBackAndForward30SecondsButtons(self)
-        backButton.image = skipBy30 ? .PUIBack30s : .PUIBack15s
-        backButton.action = skipBy30 ? #selector(goBackInTime30) : #selector(goBackInTime15)
-        backButton.toolTip = skipBy30 ? "Go back 30s" : "Go back 15s"
-        forwardButton.image = skipBy30 ? .PUIForward30s : .PUIForward15s
-        forwardButton.action = skipBy30 ? #selector(goForwardInTime30) : #selector(goForwardInTime15)
-        forwardButton.toolTip = skipBy30 ? "Go forward 30s" : "Go forward 15s"
+        isConfiguredForBackAndForward30s = d.playerViewShouldShowBackAndForward30SecondsButtons(self)
+        backButton.image = goBackInTimeImage
+        backButton.action = #selector(goBackInTime)
+        backButton.toolTip = goBackInTimeDescription
+        forwardButton.image = goForwardInTimeImage
+        forwardButton.action = #selector(goForwardInTime)
+        forwardButton.toolTip = goForwardInTimeDescription
 
         updateExternalPlaybackControlsAvailability()
 
@@ -778,10 +852,10 @@ public final class PUIPlayerView: NSView {
 
     fileprivate func updateExternalPlaybackMenus() {
         // clean menu
-        extrasMenuContainerView.arrangedSubviews.enumerated().forEach { idx, v in
+        extrasMenuContainerView.arrangedSubviews.enumerated().forEach { idx, view in
             guard idx < extrasMenuContainerView.arrangedSubviews.count - 1 else { return }
 
-            extrasMenuContainerView.removeArrangedSubview(v)
+            extrasMenuContainerView.removeArrangedSubview(view)
         }
 
         // repopulate
@@ -834,6 +908,8 @@ public final class PUIPlayerView: NSView {
         } else {
             play(sender)
         }
+
+        invalidateTouchBar()
     }
 
     @IBAction public func pause(_ sender: Any?) {
@@ -845,10 +921,23 @@ public final class PUIPlayerView: NSView {
     }
 
     @IBAction public func play(_ sender: Any?) {
+        if player?.error != nil
+            || player?.currentItem?.error != nil,
+            let asset = player?.currentItem?.asset as? AVURLAsset {
+
+            // reset the player on error
+            player?.replaceCurrentItem(with: AVPlayerItem(asset: AVURLAsset(url: asset.url)))
+        }
+
         if isPlayingExternally {
             currentExternalPlaybackProvider?.play()
         } else {
-            player?.rate = playbackSpeed.rawValue
+            guard let player = player else { return }
+            if player.hasFinishedPlaying {
+                seek(to: 0)
+            }
+
+            player.rate = playbackSpeed.rawValue
         }
     }
 
@@ -862,6 +951,22 @@ public final class PUIPlayerView: NSView {
         guard let annotation = firstAnnotationAfterCurrentTime else { return }
 
         seek(to: annotation)
+    }
+
+    @IBAction public func goBackInTime(_ sender: Any?) {
+        if isConfiguredForBackAndForward30s {
+            goBackInTime30(sender)
+        } else {
+            goBackInTime15(sender)
+        }
+    }
+
+    @IBAction public func goForwardInTime(_ sender: Any?) {
+        if isConfiguredForBackAndForward30s {
+            goForwardInTime30(sender)
+        } else {
+            goForwardInTime15(sender)
+        }
     }
 
     @IBAction public func goBackInTime15(_ sender: Any?) {
@@ -881,7 +986,29 @@ public final class PUIPlayerView: NSView {
     }
 
     @IBAction public func toggleSpeed(_ sender: Any?) {
-        playbackSpeed = playbackSpeed.next
+        if NSEvent.modifierFlags.contains(.option) {
+            playbackSpeed = playbackSpeed.previous
+        } else {
+            playbackSpeed = playbackSpeed.next
+        }
+    }
+    
+    public func reduceSpeed() {
+        guard let speedIndex = PUIPlaybackSpeed.all.firstIndex(of: playbackSpeed) else { return }
+        if speedIndex > 0 {
+            playbackSpeed = PUIPlaybackSpeed.all[speedIndex - 1]
+            showControls(animated: true)
+            resetMouseIdleTimer()
+        }
+    }
+    
+    public func increaseSpeed() {
+        guard let speedIndex = PUIPlaybackSpeed.all.firstIndex(of: playbackSpeed) else { return }
+        if speedIndex < PUIPlaybackSpeed.all.count - 1 {
+            playbackSpeed = PUIPlaybackSpeed.all[speedIndex + 1]
+            showControls(animated: true)
+            resetMouseIdleTimer()
+        }
     }
 
     @IBAction public func addAnnotation(_ sender: NSView?) {
@@ -909,16 +1036,28 @@ public final class PUIPlayerView: NSView {
 
         guard let durationTime = player.currentItem?.duration else { return }
 
-        let modifier = CMTimeMakeWithSeconds(seconds, durationTime.timescale)
+        let modifier = CMTimeMakeWithSeconds(seconds, preferredTimescale: durationTime.timescale)
         let targetTime = function(player.currentTime(), modifier)
 
-        guard targetTime.isValid && targetTime.isNumeric else { return }
+        seek(to: targetTime)
+    }
+
+    private func seek(to timestamp: TimeInterval) {
+        seek(to: CMTimeMakeWithSeconds(timestamp, preferredTimescale: 90000))
+    }
+
+    private func seek(to time: CMTime) {
+        guard time.isValid && time.isNumeric else { return }
 
         if isPlayingExternally {
-            currentExternalPlaybackProvider?.seek(to: seconds)
+            currentExternalPlaybackProvider?.seek(to: CMTimeGetSeconds(time))
         } else {
-            player.seek(to: targetTime)
+            player?.seek(to: time)
         }
+    }
+
+    private func invalidateTouchBar(destructive: Bool = false) {
+        touchBarController.invalidate(destructive)
     }
 
     // MARK: - Subtitles
@@ -926,10 +1065,10 @@ public final class PUIPlayerView: NSView {
     private var subtitlesMenu: NSMenu?
     private var subtitlesGroup: AVMediaSelectionGroup?
 
-    private func updateMediaSelection() {
+    private func updateSubtitleSelectionMenu() {
         guard let playerItem = player?.currentItem else { return }
 
-        guard let subtitlesGroup = playerItem.asset.mediaSelectionGroup(forMediaCharacteristic: AVMediaCharacteristic.legible) else {
+        guard let subtitlesGroup = playerItem.asset.mediaSelectionGroup(forMediaCharacteristic: .legible) else {
             subtitlesButton.isHidden = true
             return
         }
@@ -958,7 +1097,7 @@ public final class PUIPlayerView: NSView {
         // reset all item's states
         sender.menu?.items.forEach({ $0.state = .on })
 
-        if option.extendedLanguageTag == player?.currentItem?.selectedMediaOption(in: subtitlesGroup)?.extendedLanguageTag {
+        if option.extendedLanguageTag == player?.currentItem?.currentMediaSelection.selectedMediaOption(in: subtitlesGroup)?.extendedLanguageTag {
             player?.currentItem?.select(nil, in: subtitlesGroup)
             sender.state = .off
             return
@@ -1006,6 +1145,13 @@ public final class PUIPlayerView: NSView {
 
     private enum KeyCommands: UInt16 {
         case spaceBar = 49
+        case leftArrow = 123
+        case rightArrow = 124
+        case minus = 27
+        case plus = 24
+        case j = 38
+        case k = 40
+        case l = 37
     }
 
     private func startMonitoringKeyEvents() {
@@ -1013,18 +1159,36 @@ public final class PUIPlayerView: NSView {
             stopMonitoringKeyEvents()
         }
 
-        keyDownEventMonitor = NSEvent.addLocalMonitorForEvents(matching: [NSEvent.EventTypeMask.keyDown]) { [unowned self] event in
+        keyDownEventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [unowned self] event in
             guard let command = KeyCommands(rawValue: event.keyCode) else {
                 return event
             }
 
-            // ignore keystrokes when editing text
-            guard !(self.window?.firstResponder is NSTextView) else { return event }
+            let allWindows = NSApp.windows
+            let firstResponders = allWindows.compactMap { $0.firstResponder }
+            let fieldEditors = firstResponders.filter { ($0 as? NSText)?.isEditable == true }
+            guard fieldEditors.isEmpty else { return event }
             guard !self.timelineView.isEditingAnnotation else { return event }
 
             switch command {
-            case .spaceBar:
+            case .spaceBar, .k:
                 self.togglePlaying(nil)
+                return nil
+
+            case .leftArrow, .j:
+                self.goBackInTime(nil)
+                return nil
+
+            case .rightArrow, .l:
+                self.goForwardInTime(nil)
+                return nil
+ 
+            case .minus:
+                self.reduceSpeed()
+                return nil
+ 
+            case .plus:
+                self.increaseSpeed()
                 return nil
             }
         }
@@ -1038,11 +1202,19 @@ public final class PUIPlayerView: NSView {
         keyDownEventMonitor = nil
     }
 
+    // MARK: - Touch Bar
 
+    private lazy var touchBarController: PUITouchBarController = {
+        return PUITouchBarController(playerView: self)
+    }()
+
+    public override func makeTouchBar() -> NSTouchBar? {
+        return touchBarController.makeTouchBar()
+    }
 
     // MARK: - PiP Support
 
-    public func snapshotPlayer(completion: @escaping (NSImage?) -> Void) {
+    public func snapshotPlayer(completion: @escaping (CGImage?) -> Void) {
         guard let currentTime = player?.currentTime() else {
             completion(nil)
             return
@@ -1062,8 +1234,7 @@ public final class PUIPlayerView: NSView {
                 return
             }
 
-            let image = NSImage(cgImage: rawImage, size: NSSize(width: rawImage.width, height: rawImage.height))
-            DispatchQueue.main.async { completion(image) }
+            DispatchQueue.main.async { completion(rawImage) }
         }
     }
 
@@ -1088,8 +1259,8 @@ public final class PUIPlayerView: NSView {
     }
 
     fileprivate func exitPictureInPictureMode() {
-        if pictureContainer.presenting == pipController {
-            pipController?.dismissViewController(pictureContainer)
+        if pictureContainer.presentingViewController == pipController {
+            pipController?.dismiss(pictureContainer)
         }
     }
 
@@ -1101,6 +1272,7 @@ public final class PUIPlayerView: NSView {
         guard isPlaying else { return false }
         guard player.status == .readyToPlay else { return false }
         guard let window = window else { return false }
+        guard window.isOnActiveSpace && window.isVisible else { return false }
 
         guard !timelineView.isEditingAnnotation else { return false }
 
@@ -1156,11 +1328,16 @@ public final class PUIPlayerView: NSView {
     }
 
     public override func viewWillMove(toWindow newWindow: NSWindow?) {
+
         NotificationCenter.default.removeObserver(self, name: NSWindow.willEnterFullScreenNotification, object: window)
         NotificationCenter.default.removeObserver(self, name: NSWindow.willExitFullScreenNotification, object: window)
+        NotificationCenter.default.removeObserver(self, name: NSWindow.didResignMainNotification, object: window)
+        NotificationCenter.default.removeObserver(self, name: NSWindow.didBecomeMainNotification, object: window)
 
         NotificationCenter.default.addObserver(self, selector: #selector(windowWillEnterFullScreen), name: NSWindow.willEnterFullScreenNotification, object: newWindow)
         NotificationCenter.default.addObserver(self, selector: #selector(windowWillExitFullScreen), name: NSWindow.willExitFullScreenNotification, object: newWindow)
+        NotificationCenter.default.addObserver(self, selector: #selector(windowDidResignMain), name: NSWindow.didResignMainNotification, object: newWindow)
+        NotificationCenter.default.addObserver(self, selector: #selector(windowDidBecomeMain), name: NSWindow.didBecomeMainNotification, object: newWindow)
     }
 
     public override func viewDidMoveToWindow() {
@@ -1172,13 +1349,14 @@ public final class PUIPlayerView: NSView {
         if window != nil {
             lastKnownWindow = window
             startMonitoringKeyEvents()
+            invalidateTouchBar(destructive: true)
         }
     }
 
-    private var windowIsInFullScreen: Bool {
+    var windowIsInFullScreen: Bool {
         guard let window = window else { return false }
 
-        return window.styleMask.contains(NSWindow.StyleMask.fullScreen)
+        return window.styleMask.contains(.fullScreen)
     }
 
     @objc private func windowWillEnterFullScreen() {
@@ -1187,8 +1365,27 @@ public final class PUIPlayerView: NSView {
     }
 
     @objc private func windowWillExitFullScreen() {
-        fullScreenButton.isHidden = false
+        if let d = appearanceDelegate {
+            fullScreenButton.isHidden = !d.playerViewShouldShowFullScreenButton(self)
+        }
+
         updateExtrasMenuPosition()
+    }
+
+    @objc private func windowDidBecomeMain() {
+
+        // becoming main in full screen means we're entering the space
+        if windowIsInFullScreen {
+            resetMouseIdleTimer(start: true)
+        }
+    }
+
+    @objc private func windowDidResignMain() {
+
+        // resigning main in full screen means we're leaving the space
+        if windowIsInFullScreen {
+            resetMouseIdleTimer(start: false)
+        }
     }
 
     // MARK: - Events
@@ -1202,7 +1399,7 @@ public final class PUIPlayerView: NSView {
             removeTrackingArea(mouseTrackingArea)
         }
 
-        let options: NSTrackingArea.Options = [NSTrackingArea.Options.mouseEnteredAndExited, NSTrackingArea.Options.mouseMoved, NSTrackingArea.Options.activeAlways, NSTrackingArea.Options.inVisibleRect]
+        let options: NSTrackingArea.Options = [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect]
         mouseTrackingArea = NSTrackingArea(rect: bounds, options: options, owner: self, userInfo: nil)
 
         addTrackingArea(mouseTrackingArea)
@@ -1212,7 +1409,7 @@ public final class PUIPlayerView: NSView {
         showControls(animated: true)
         resetMouseIdleTimer()
 
-        super.mouseExited(with: event)
+        super.mouseEntered(with: event)
     }
 
     public override func mouseMoved(with event: NSEvent) {
@@ -1334,7 +1531,7 @@ extension PUIPlayerView: PUITimelineViewDelegate {
         guard let duration = asset?.duration else { return }
 
         let targetTime = progress * Double(CMTimeGetSeconds(duration))
-        let time = CMTimeMakeWithSeconds(targetTime, duration.timescale)
+        let time = CMTimeMakeWithSeconds(targetTime, preferredTimescale: duration.timescale)
 
         if isPlayingExternally {
             currentExternalPlaybackProvider?.seek(to: targetTime)
@@ -1368,7 +1565,7 @@ extension PUIPlayerView: PUIExternalPlaybackConsumer {
             playbackSpeed = speed
         }
 
-        let time = CMTimeMakeWithSeconds(Float64(provider.status.currentTime), 9000)
+        let time = CMTimeMakeWithSeconds(Float64(provider.status.currentTime), preferredTimescale: 9000)
         playerTimeDidChange(time: time)
 
         updatePlayingState()
@@ -1399,7 +1596,7 @@ extension PUIPlayerView: PUIExternalPlaybackConsumer {
     }
 
     public func externalPlaybackProvider(_ provider: PUIExternalPlaybackProvider, deviceSelectionMenuDidChangeWith menu: NSMenu) {
-        guard let registrationIndex = externalPlaybackProviders.index(where: { type(of: $0.provider).name == type(of: provider).name }) else { return }
+        guard let registrationIndex = externalPlaybackProviders.firstIndex(where: { type(of: $0.provider).name == type(of: provider).name }) else { return }
 
         externalPlaybackProviders[registrationIndex].menu = menu
     }
@@ -1420,11 +1617,11 @@ extension PUIPlayerView: PIPViewControllerDelegate, PUIPictureContainerViewContr
 
     public func pipActionStop(_ pip: PIPViewController) {
         pause(pip)
-        delegate?.playerViewWillExitPictureInPictureMode(self, isReturningFromPiP: false)
+        delegate?.playerViewWillExitPictureInPictureMode(self, reason: .exitButton)
     }
 
     public func pipActionReturn(_ pip: PIPViewController) {
-        delegate?.playerViewWillExitPictureInPictureMode(self, isReturningFromPiP: true)
+        delegate?.playerViewWillExitPictureInPictureMode(self, reason: .returnButton)
 
         if !NSApp.isActive {
             NSApp.activate(ignoringOtherApps: true)
@@ -1468,12 +1665,12 @@ extension PUIPlayerView: PIPViewControllerDelegate, PUIPictureContainerViewContr
         pictureContainer.view.frame = superview.bounds
 
         if superview == self, pipController != nil {
-            if pictureContainer.presenting == pipController {
-                pipController?.dismissViewController(pictureContainer)
+            if pictureContainer.presentingViewController == pipController {
+                pipController?.dismiss(pictureContainer)
             }
-            
+
             pipController = nil
         }
     }
-    
+
 }

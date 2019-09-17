@@ -22,6 +22,7 @@ extension Notification.Name {
 protocol VideoPlayerViewControllerDelegate: class {
 
     func createBookmark(at timecode: Double, with snapshot: NSImage?)
+    func createFavorite()
 
 }
 
@@ -48,9 +49,8 @@ final class VideoPlayerViewController: NSViewController {
         }
     }
 
-    var detached = false
-
-    var playerWillExitPictureInPicture: ((Bool) -> Void)?
+    var playerWillExitPictureInPicture: ((PUIPiPExitReason) -> Void)?
+    var playerWillExitFullScreen: (() -> Void)?
 
     init(player: AVPlayer, session: SessionViewModel) {
         sessionViewModel = session
@@ -68,13 +68,14 @@ final class VideoPlayerViewController: NSViewController {
     }()
 
     fileprivate lazy var progressIndicator: NSProgressIndicator = {
-        let p = NSProgressIndicator(frame: NSZeroRect)
+        let p = NSProgressIndicator(frame: NSRect.zero)
 
         p.controlSize = .regular
         p.style = .spinning
         p.isIndeterminate = true
         p.translatesAutoresizingMaskIntoConstraints = false
         p.appearance = NSAppearance(named: NSAppearance.Name(rawValue: "WhiteSpinner"))
+        p.isHidden = true
 
         p.sizeToFit()
 
@@ -82,7 +83,7 @@ final class VideoPlayerViewController: NSViewController {
     }()
 
     override func loadView() {
-        view = NSView(frame: NSZeroRect)
+        view = NSView(frame: NSRect.zero)
         view.wantsLayer = true
         view.layer?.backgroundColor = NSColor.black.cgColor
 
@@ -100,7 +101,7 @@ final class VideoPlayerViewController: NSViewController {
         view.addSubview(progressIndicator)
         view.addConstraints([
             NSLayoutConstraint(item: progressIndicator, attribute: .centerX, relatedBy: .equal, toItem: view, attribute: .centerX, multiplier: 1.0, constant: 0.0),
-            NSLayoutConstraint(item: progressIndicator, attribute: .centerY, relatedBy: .equal, toItem: view, attribute: .centerY, multiplier: 1.0, constant: 0.0),
+            NSLayoutConstraint(item: progressIndicator, attribute: .centerY, relatedBy: .equal, toItem: view, attribute: .centerY, multiplier: 1.0, constant: 0.0)
             ])
 
         progressIndicator.layer?.zPosition = 999
@@ -115,14 +116,13 @@ final class VideoPlayerViewController: NSViewController {
         updateUI()
 
         NotificationCenter.default.addObserver(self, selector: #selector(annotationSelected(notification:)), name: .TranscriptControllerDidSelectAnnotation, object: nil)
-        
-        NotificationCenter.default.addObserver(forName: .SkipBackAndForwardBy30SecondsPreferenceDidChange, object: nil, queue: OperationQueue.main) { _ in
-            Swift.print("hello there!")
+
+        NotificationCenter.default.rx.notification(.SkipBackAndForwardBy30SecondsPreferenceDidChange).observeOn(MainScheduler.instance).subscribe { _ in
             self.playerView.invalidateAppearance()
-        }
+        }.disposed(by: disposeBag)
     }
 
-    func resetAppearanceDelegate()  {
+    func resetAppearanceDelegate() {
         playerView.appearanceDelegate = self
     }
 
@@ -137,18 +137,14 @@ final class VideoPlayerViewController: NSViewController {
 
             oldPlayer.pause()
             oldPlayer.cancelPendingPrerolls()
-            oldPlayer.removeObserver(self, forKeyPath: #keyPath(AVPlayer.status))
-            oldPlayer.removeObserver(self, forKeyPath: #keyPath(AVPlayer.currentItem.presentationSize))
+            oldPlayer.currentItem?.cancelPendingSeeks()
+            oldPlayer.currentItem?.asset.cancelLoading()
         }
 
-        player.addObserver(self, forKeyPath: #keyPath(AVPlayer.status), options: [.initial, .new], context: nil)
-        player.addObserver(self, forKeyPath: #keyPath(AVPlayer.currentItem.presentationSize), options: [.initial, .new], context: nil)
-
-        player.play()
-
-        progressIndicator.startAnimation(nil)
+        setupPlayerObservers()
 
         playerView.player = player
+        playerView.play(self)
 
         if let playbackViewModel = playbackViewModel {
             playerView.remoteMediaUrl = playbackViewModel.remoteMediaURL
@@ -162,7 +158,7 @@ final class VideoPlayerViewController: NSViewController {
 
     func updateUI() {
         let bookmarks = sessionViewModel.session.bookmarks.sorted(byKeyPath: "timecode")
-        Observable.collection(from: bookmarks).observeOn(MainScheduler.instance).subscribe(onNext: { [weak self] bookmarks in
+        Observable.shallowCollection(from: bookmarks).observeOn(MainScheduler.instance).subscribe(onNext: { [weak self] bookmarks in
             self?.playerView.annotations = bookmarks.toArray()
         }).disposed(by: disposeBag)
     }
@@ -171,36 +167,80 @@ final class VideoPlayerViewController: NSViewController {
         guard let (transcript, annotation) = notification.object as? (Transcript, TranscriptAnnotation) else { return }
         guard transcript.identifier == sessionViewModel.session.transcriptIdentifier else { return }
 
-        let time = CMTimeMakeWithSeconds(annotation.timecode, 90000)
+        let time = CMTimeMakeWithSeconds(annotation.timecode, preferredTimescale: 90000)
         player.seek(to: time)
     }
 
     // MARK: - Player Observation
 
-    override func observeValue(forKeyPath keyPath: String?, of object: Any?, change: [NSKeyValueChangeKey : Any]?, context: UnsafeMutableRawPointer?) {
-        guard let keyPath = keyPath else { return }
+    private var playerStatusObserver: NSKeyValueObservation?
+    private var currentItemStatusObserver: NSKeyValueObservation?
+    private var presentationSizeObserver: NSKeyValueObservation?
+    private var currentItemObserver: NSKeyValueObservation?
+    private var timeControlStatusObserver: NSKeyValueObservation?
 
-        if keyPath == #keyPath(AVPlayer.currentItem.presentationSize) {
-            DispatchQueue.main.async(execute: playerItemPresentationSizeDidChange)
-        } else if keyPath == #keyPath(AVPlayer.status) {
-            DispatchQueue.main.async(execute: playerStatusDidChange)
-        } else {
-            super.observeValue(forKeyPath: keyPath, of: object, change: change, context: context)
+    private func setupPlayerObservers() {
+
+        playerStatusObserver = player.observe(\.status, options: [.initial, .new], changeHandler: { [weak self] (player, change) in
+            guard let self = self else { return }
+            DispatchQueue.main.async(execute: self.showPlaybackErrorIfNeeded)
+        })
+
+        timeControlStatusObserver = player.observe(\AVPlayer.timeControlStatus) { [weak self] (player, change) in
+            guard let self = self else { return }
+            DispatchQueue.main.async(execute: self.timeControlStatusDidChange)
+        }
+
+        currentItemObserver = player.observe(\.currentItem, options: [.initial, .new]) { [weak self] (player, change) in
+            self?.presentationSizeObserver = player.currentItem?.observe(\.presentationSize, options: [.initial, .new]) { [weak self] (player, change) in
+                guard let self = self else { return }
+                DispatchQueue.main.async(execute: self.playerItemPresentationSizeDidChange)
+            }
+
+            self?.currentItemStatusObserver = player.currentItem?.observe(\.status) { item, _ in
+                guard let self = self else { return }
+                self.showPlaybackErrorIfNeeded()
+            }
         }
     }
 
     private func playerItemPresentationSizeDidChange() {
-        guard let size = player.currentItem?.presentationSize, size != NSZeroSize else { return }
+        guard let size = player.currentItem?.presentationSize, size != NSSize.zero else { return }
 
         (view.window as? PUIPlayerWindow)?.aspectRatio = size
     }
 
-    private func playerStatusDidChange() {
-        switch player.status {
-        case .readyToPlay, .failed:
-            progressIndicator.stopAnimation(nil)
-            progressIndicator.isHidden = true
-        default: break
+    private func showPlaybackErrorIfNeeded() {
+
+        if let error = player.error ?? player.currentItem?.error {
+            WWDCAlert.show(with: error)
+        }
+    }
+
+    private func timeControlStatusDidChange() {
+        func showLoading() {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { [weak self] in
+                guard self?.player.timeControlStatus == .waitingToPlayAtSpecifiedRate else { return }
+                self?.progressIndicator.startAnimation(nil)
+                self?.progressIndicator.isHidden = false
+            }
+        }
+
+        func hideLoading() {
+            if !progressIndicator.isHidden {
+                progressIndicator.stopAnimation(nil)
+                progressIndicator.isHidden = true
+            }
+        }
+
+        switch player.timeControlStatus {
+        case .waitingToPlayAtSpecifiedRate:
+            showLoading()
+        case .playing, .paused:
+            hideLoading()
+        @unknown default:
+            assertionFailure("An unexpected case was discovered on an non-frozen obj-c enum")
+            hideLoading()
         }
     }
 
@@ -239,16 +279,14 @@ final class VideoPlayerViewController: NSViewController {
             self?.detachedWindowController = nil
         }
 
-        detachedWindowController.showWindow(self)
+        detachedWindowController.actionOnWindowWillExitFullScreen = { [weak self] in
+            self?.playerWillExitFullScreen?()
+        }
 
-        detached = true
+        detachedWindowController.showWindow(self)
     }
 
     deinit {
-        #if DEBUG
-            Swift.print("VideoPlayerViewController is gone")
-        #endif
-
         player.removeObserver(self, forKeyPath: #keyPath(AVPlayer.currentItem.presentationSize))
         player.removeObserver(self, forKeyPath: #keyPath(AVPlayer.status))
     }
@@ -267,63 +305,68 @@ extension VideoPlayerViewController: PUIPlayerViewDelegate {
 
     func playerViewDidSelectAddAnnotation(_ playerView: PUIPlayerView, at timestamp: Double) {
         snapshotPlayer { snapshot in
-            self.delegate?.createBookmark(at: timestamp, with: snapshot)
+            self.delegate?.createBookmark(at: timestamp,
+                                          with: snapshot.map { NSImage(cgImage: $0, size: NSSize(width: $0.width, height: $0.height)) })
         }
     }
 
-    private func snapshotPlayer(completion: @escaping (NSImage?) -> Void) {
+    private func snapshotPlayer(completion: @escaping (CGImage?) -> Void) {
         playerView.snapshotPlayer(completion: completion)
     }
 
-    func playerViewWillExitPictureInPictureMode(_ playerView: PUIPlayerView, isReturningFromPiP: Bool) {
-        playerWillExitPictureInPicture?(isReturningFromPiP)
+    func playerViewWillExitPictureInPictureMode(_ playerView: PUIPlayerView, reason: PUIPiPExitReason) {
+        playerWillExitPictureInPicture?(reason)
     }
 
     func playerViewWillEnterPictureInPictureMode(_ playerView: PUIPlayerView) {
 
     }
 
+    func playerViewDidSelectLike(_ playerView: PUIPlayerView) {
+        delegate?.createFavorite()
+    }
+
 }
 
 extension VideoPlayerViewController: PUIPlayerViewAppearanceDelegate {
-    
+
     func playerViewShouldShowSubtitlesControl(_ playerView: PUIPlayerView) -> Bool {
        return true
     }
-    
+
     func playerViewShouldShowPictureInPictureControl(_ playerView: PUIPlayerView) -> Bool {
        return true
     }
-    
+
     func playerViewShouldShowSpeedControl(_ playerView: PUIPlayerView) -> Bool {
         return !sessionViewModel.sessionInstance.isCurrentlyLive
     }
-    
+
     func playerViewShouldShowAnnotationControls(_ playerView: PUIPlayerView) -> Bool {
         return !sessionViewModel.sessionInstance.isCurrentlyLive
     }
-    
+
     func playerViewShouldShowBackAndForwardControls(_ playerView: PUIPlayerView) -> Bool {
         return !sessionViewModel.sessionInstance.isCurrentlyLive
     }
-    
+
     func playerViewShouldShowExternalPlaybackControls(_ playerView: PUIPlayerView) -> Bool {
         return true
     }
-    
+
     func playerViewShouldShowFullScreenButton(_ playerView: PUIPlayerView) -> Bool {
         return true
     }
-    
+
     func playerViewShouldShowTimelineView(_ playerView: PUIPlayerView) -> Bool {
         return !sessionViewModel.sessionInstance.isCurrentlyLive
     }
-    
+
     func playerViewShouldShowTimestampLabels(_ playerView: PUIPlayerView) -> Bool {
         return !sessionViewModel.sessionInstance.isCurrentlyLive
     }
-    
-    func PlayerViewShouldShowBackAndForward30SecondsButtons(_ playerView: PUIPlayerView) -> Bool {
+
+    func playerViewShouldShowBackAndForward30SecondsButtons(_ playerView: PUIPlayerView) -> Bool {
         return Preferences.shared.skipBackAndForwardBy30Seconds
     }
 }
@@ -332,7 +375,7 @@ extension Transcript {
 
     func timecodesWithTimescale(_ timescale: Int32) -> [NSValue] {
         return annotations.map { annotation -> NSValue in
-            let time = CMTimeMakeWithSeconds(annotation.timecode, timescale)
+            let time = CMTimeMakeWithSeconds(annotation.timecode, preferredTimescale: timescale)
 
             return NSValue(time: time)
         }
@@ -344,5 +387,5 @@ extension Transcript {
 
         return formatter.string(from: NSNumber(value: timecode)) ?? "0.0"
     }
-    
+
 }

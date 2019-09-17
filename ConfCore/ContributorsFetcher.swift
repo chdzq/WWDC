@@ -7,11 +7,13 @@
 //
 
 import Cocoa
-import SwiftyJSON
+import os.log
 
 public final class ContributorsFetcher {
 
     public static let shared: ContributorsFetcher = ContributorsFetcher()
+
+    private let log = OSLog(subsystem: "WWDC", category: "ContributorsFetcher")
 
     fileprivate struct Constants {
         static let contributorsURL = "https://api.github.com/repos/insidegui/WWDC/contributors"
@@ -20,7 +22,7 @@ public final class ContributorsFetcher {
     private let syncQueue = DispatchQueue(label: "io.wwdc.app.contributorsfetcher.sync")
     private var names = [String]()
 
-    public var infoTextChangedCallback: (_ newText: String) -> () = { _ in }
+    public var infoTextChangedCallback: (_ newText: String) -> Void = { _ in }
 
     public var infoText = "" {
         didSet {
@@ -43,9 +45,9 @@ public final class ContributorsFetcher {
         let task = URLSession.shared.dataTask(with: url) { [unowned self] data, response, error in
             guard let data = data, error == nil else {
                 if let error = error {
-                    NSLog("[ContributorsFetcher] Error fetching contributors: \(error)")
+                    os_log("Error fetching contributors: %{public}@", log: self.log, type: .error, String(describing: error))
                 } else {
-                    NSLog("[ContributorsFetcher] Error fetching contributors: no data returned")
+                    os_log("Error fetching contributors: network call returned no data", log: self.log, type: .error)
                 }
 
                 self.buildInfoText(self.names)
@@ -54,7 +56,11 @@ public final class ContributorsFetcher {
             }
 
             self.syncQueue.async {
-                self.names += self.parseResponse(data)
+                do {
+                    self.names += try self.parseResponse(data)
+                } catch {
+                    os_log("Failed to decode contributors names", log: self.log, type: .error)
+                }
 
                 if let linkHeader = (response as? HTTPURLResponse)?.allHeaderFields["Link"] as? String,
                     let nextPage = GitHubPagination(linkHeader: linkHeader)?.next {
@@ -68,18 +74,9 @@ public final class ContributorsFetcher {
         task.resume()
     }
 
-    fileprivate func parseResponse(_ data: Data) -> [String] {
-        let jsonData = JSON(data: data)
-        guard let contributors = jsonData.array else { return [String]() }
+    fileprivate func parseResponse(_ data: Data) throws -> [String] {
 
-        var contributorNames = [String]()
-        for contributor in contributors {
-            if let name = contributor["login"].string {
-                contributorNames.append(name)
-            }
-        }
-
-        return contributorNames
+        return try JSONDecoder().decode([GitHubUser].self, from: data).map { $0.login }
     }
 
     fileprivate func buildInfoText(_ names: [String]) {
@@ -95,6 +92,10 @@ public final class ContributorsFetcher {
     }
 }
 
+private struct GitHubUser: Codable {
+    var login: String
+}
+
 private struct GitHubPagination {
 
     var first: URL?
@@ -102,18 +103,21 @@ private struct GitHubPagination {
     var previous: URL?
     var last: URL?
 
+    // swiftlint:disable force_try
+    // As these regex's are constants, we don't need to worry about the failures
     private static let urlRegex = try! NSRegularExpression(pattern: "<(.*)>", options: [])
     private static let typeRegex = try! NSRegularExpression(pattern: "rel=\"(.*)\"", options: [])
+    // swiftlint:enable force_try
 
     init?(linkHeader: String) {
-        let links: [(URL, String)] = linkHeader.components(separatedBy: ",").flatMap { link in
+        let links: [(URL, String)] = linkHeader.components(separatedBy: ",").compactMap { link in
             let section = link.components(separatedBy: ";")
 
             if section.count < 2 {
                 return nil
             }
 
-            let urlRange = NSRange(location: 0, length: section[0].characters.count)
+            let urlRange = NSRange(location: 0, length: section[0].count)
             var urlString = GitHubPagination.urlRegex.stringByReplacingMatches(in: section[0],
                                                                                range: urlRange,
                                                                                withTemplate: "$1")
@@ -123,7 +127,7 @@ private struct GitHubPagination {
                 return nil
             }
 
-            let typeRange = NSRange(location: 0, length: section[1].characters.count)
+            let typeRange = NSRange(location: 0, length: section[1].count)
             var type = GitHubPagination.typeRegex.stringByReplacingMatches(in: section[1],
                                                                            range: typeRange,
                                                                            withTemplate: "$1")
@@ -142,12 +146,12 @@ private struct GitHubPagination {
 
             case "prev":
                 previous = url
-                
+
             case "last":
                 last = url
-                
+
             default:
-                break;
+                break
             }
         }
     }

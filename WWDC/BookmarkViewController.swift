@@ -29,7 +29,7 @@ private final class WWDCTextView: NSTextView {
             }
         }
     }()
-    
+
     override func didChangeText() {
         super.didChangeText()
 
@@ -70,7 +70,7 @@ final class BookmarkViewController: NSViewController {
         v.backgroundColor = .clear
         v.font = .systemFont(ofSize: 12)
         v.textColor = .secondaryText
-        v.autoresizingMask = [NSView.AutoresizingMask.width, NSView.AutoresizingMask.height]
+        v.autoresizingMask = [.width, .height]
 
         return v
     }()
@@ -82,6 +82,7 @@ final class BookmarkViewController: NSViewController {
         v.backgroundColor = .clear
         v.borderType = .noBorder
         v.documentView = self.textView
+        v.autohidesScrollers = true
 
         return v
     }()
@@ -123,7 +124,7 @@ final class BookmarkViewController: NSViewController {
 
         textView.rxText.throttle(1, scheduler: MainScheduler.instance).subscribe(onNext: { [weak self] text in
             guard let bookmark = self?.bookmark else { return }
-            
+
             self?.storage.modify(bookmark) { $0.body = text }
         }).disposed(by: disposeBag)
     }

@@ -8,24 +8,25 @@
 
 import Foundation
 
-typealias WWDCFiltersStateDictionary = [ String : [ FilterIdentifier.RawValue : WWDCFilterTypeDictionary ] ]
-typealias WWDCFilterTypeDictionary = [ String : Any ]
+typealias WWDCFiltersStateDictionary = [ String : [ FilterIdentifier.RawValue: WWDCFilterTypeDictionary ] ]
+typealias WWDCFilterTypeDictionary = [ String: Any ]
 
 protocol FilterType {
 
     var identifier: String { get set }
     var isEmpty: Bool { get }
     var predicate: NSPredicate? { get }
+    mutating func reset()
     func dictionaryRepresentation() -> WWDCFilterTypeDictionary
 
 }
 
 // Can't use WWDCFilterTypeDictionary as Value's type, likely a bug in Swift
-extension Dictionary where Key == String, Value == [ String : Any ] {
+extension Dictionary where Key == String, Value == [ String: Any ] {
 
     init?(filters: [FilterType]) {
 
-        self = [String : WWDCFilterTypeDictionary]()
+        self = [String: WWDCFilterTypeDictionary]()
 
         for filter in filters {
 
@@ -42,7 +43,7 @@ extension Dictionary where Key == String, Value == [ String : Any ] {
                 //MultipleChoiceFilter
                 self[filterID.rawValue] = filter.dictionaryRepresentation()
 
-            case .isFavorite, .isDownloaded, .isUnwatched:
+            case .isFavorite, .isDownloaded, .isUnwatched, .hasBookmarks:
                 //ToggleFilters
                 self[filterID.rawValue] = filter.dictionaryRepresentation()
             }
@@ -68,7 +69,14 @@ extension Array where Element == FilterType {
 
             for filter in self {
 
-                if !otherArray.contains(where: { $0.identifier == filter.identifier }) {
+                if !otherArray.contains(where: {
+                    if let mc0 = $0 as? MultipleChoiceFilter, let mc1 = filter as? MultipleChoiceFilter {
+                        return mc0.identifier == mc1.identifier && mc0.options == mc1.options
+                    } else {
+                        return $0.identifier == filter.identifier
+                    }
+
+                }) {
                     isIdentical = false
                     break
                 }

@@ -19,6 +19,10 @@ public enum PUIPlaybackSpeed: Float {
         return [.slow, .normal, .midFast, .fast, .fastest]
     }
 
+    static var supportedPlaybackRates: [NSNumber] {
+        return all.map { NSNumber(value: $0.rawValue) }
+    }
+
     var icon: NSImage {
         switch self {
         case .slow:
@@ -34,13 +38,23 @@ public enum PUIPlaybackSpeed: Float {
         }
     }
 
-    public var next: PUIPlaybackSpeed {
-        guard let idx = PUIPlaybackSpeed.all.index(of: self) else {
+    public var previous: PUIPlaybackSpeed {
+        guard let index = PUIPlaybackSpeed.all.firstIndex(of: self) else {
             fatalError("Tried to get next speed from nonsensical playback speed \(self). Probably missing in collection.")
         }
 
-        let nextIdx = idx + 1 < PUIPlaybackSpeed.all.count ? idx + 1 : 0
+        let previousIndex = index - 1 > -1 ? index - 1 : PUIPlaybackSpeed.all.endIndex - 1
 
-        return PUIPlaybackSpeed.all[nextIdx]
+        return PUIPlaybackSpeed.all[previousIndex]
+    }
+
+    public var next: PUIPlaybackSpeed {
+        guard let index = PUIPlaybackSpeed.all.firstIndex(of: self) else {
+            fatalError("Tried to get next speed from nonsensical playback speed \(self). Probably missing in collection.")
+        }
+
+        let nextIndex = index + 1 < PUIPlaybackSpeed.all.count ? index + 1 : 0
+
+        return PUIPlaybackSpeed.all[nextIndex]
     }
 }

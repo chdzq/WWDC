@@ -7,8 +7,10 @@
 //
 
 import Cocoa
+import PlayerUI
 
 enum MainWindowTab: Int {
+    case featured
     case schedule
     case videos
 
@@ -25,7 +27,13 @@ extension Notification.Name {
     static let MainWindowWantsToSelectSearchField = Notification.Name("MainWindowWantsToSelectSearchField")
 }
 
-final class MainWindowController: NSWindowController {
+final class MainWindowController: WWDCWindowController {
+
+    weak var activePlayerView: PUIPlayerView? {
+        didSet {
+            touchBar = nil
+        }
+    }
 
     static var defaultRect: NSRect {
         return NSScreen.main?.visibleFrame.insetBy(dx: 50, dy: 120) ??
@@ -33,38 +41,32 @@ final class MainWindowController: NSWindowController {
     }
     public var sidebarInitWidth: CGFloat?
 
-    init() {
-        let mask: NSWindow.StyleMask = [NSWindow.StyleMask.titled, NSWindow.StyleMask.resizable, NSWindow.StyleMask.miniaturizable, NSWindow.StyleMask.closable]
+    override func loadWindow() {
+        let mask: NSWindow.StyleMask = [.titled, .resizable, .miniaturizable, .closable, .fullSizeContentView]
         let window = WWDCWindow(contentRect: MainWindowController.defaultRect, styleMask: mask, backing: .buffered, defer: false)
-
-        super.init(window: window)
 
         window.title = "WWDC"
 
-        window.appearance = WWDCAppearance.appearance()
         window.center()
 
-        window.titleVisibility = .hidden
-
-        window.toolbar = NSToolbar(identifier: NSToolbar.Identifier(rawValue: "WWDC"))
-
-        window.identifier = NSUserInterfaceItemIdentifier(rawValue: "main")
-        window.setFrameAutosaveName(NSWindow.FrameAutosaveName(rawValue: "main"))
+        window.identifier = .mainWindow
+        window.setFrameAutosaveName("main")
         window.minSize = NSSize(width: 1060, height: 700)
 
-        windowDidLoad()
-    }
-
-    required init?(coder: NSCoder) {
-        fatalError("init(coder:) has not been implemented")
-    }
-
-    override func windowDidLoad() {
-        super.windowDidLoad()
+        self.window = window
     }
 
     @IBAction func performFindPanelAction(_ sender: Any) {
         NotificationCenter.default.post(name: .MainWindowWantsToSelectSearchField, object: nil)
     }
 
+    override func makeTouchBar() -> NSTouchBar? {
+        return activePlayerView?.makeTouchBar()
+    }
+
+}
+
+extension NSUserInterfaceItemIdentifier {
+
+    static let mainWindow = NSUserInterfaceItemIdentifier(rawValue: "main")
 }

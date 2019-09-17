@@ -18,6 +18,7 @@ enum FilterSegment: Int {
     case favorite
     case downloaded
     case unwatched
+    case bookmarks
 
     init?(_ id: FilterIdentifier) {
 
@@ -28,6 +29,8 @@ enum FilterSegment: Int {
             self = .downloaded
         case .isUnwatched:
             self = .unwatched
+        case .hasBookmarks:
+            self = .bookmarks
 
         default:
             return nil
@@ -46,9 +49,10 @@ extension NSSegmentedControl {
 final class SearchFiltersViewController: NSViewController {
 
     static func loadFromStoryboard() -> SearchFiltersViewController {
-        let storyboard = NSStoryboard(name: NSStoryboard.Name(rawValue: "Main"), bundle: nil)
+        let storyboard = NSStoryboard(name: "Main", bundle: nil)
 
-        return storyboard.instantiateController(withIdentifier: NSStoryboard.SceneIdentifier(rawValue: "SearchFiltersViewController")) as! SearchFiltersViewController
+        // swiftlint:disable:next force_cast
+        return storyboard.instantiateController(withIdentifier: "SearchFiltersViewController") as! SearchFiltersViewController
     }
 
     @IBOutlet weak var eventsPopUp: NSPopUpButton!
@@ -57,6 +61,7 @@ final class SearchFiltersViewController: NSViewController {
     @IBOutlet weak var bottomSegmentedControl: NSSegmentedControl!
     @IBOutlet weak var filterButton: NSButton!
     @IBOutlet weak var searchField: NSSearchField!
+    @IBOutlet weak var vfxView: NSVisualEffectView!
 
     var filters: [FilterType] {
         set {
@@ -72,22 +77,32 @@ final class SearchFiltersViewController: NSViewController {
 
     private var effectiveFilters: [FilterType] = []
 
+    func resetFilters() {
+
+        filters = filters.map {
+            var resetFilter = $0
+            resetFilter.reset()
+
+            return resetFilter
+        }
+    }
+
     weak var delegate: SearchFiltersViewControllerDelegate?
 
     @IBAction func eventsPopUpAction(_ sender: Any) {
-        guard let filterIndex = effectiveFilters.index(where: { $0.identifier == FilterIdentifier.event.rawValue }) else { return }
+        guard let filterIndex = effectiveFilters.firstIndex(where: { $0.identifier == FilterIdentifier.event.rawValue }) else { return }
 
         updateMultipleChoiceFilter(at: filterIndex, with: eventsPopUp)
     }
 
     @IBAction func focusesPopUpAction(_ sender: Any) {
-        guard let filterIndex = effectiveFilters.index(where: { $0.identifier == FilterIdentifier.focus.rawValue }) else { return }
+        guard let filterIndex = effectiveFilters.firstIndex(where: { $0.identifier == FilterIdentifier.focus.rawValue }) else { return }
 
         updateMultipleChoiceFilter(at: filterIndex, with: focusesPopUp)
     }
 
     @IBAction func tracksPopUpAction(_ sender: Any) {
-        guard let filterIndex = effectiveFilters.index(where: { $0.identifier == FilterIdentifier.track.rawValue }) else { return }
+        guard let filterIndex = effectiveFilters.firstIndex(where: { $0.identifier == FilterIdentifier.track.rawValue }) else { return }
 
         updateMultipleChoiceFilter(at: filterIndex, with: tracksPopUp)
     }
@@ -95,33 +110,41 @@ final class SearchFiltersViewController: NSViewController {
     private var favoriteSegmentSelected = false
     private var downloadedSegmentSelected = false
     private var unwatchedSegmentSelected = false
+    private var bookmarksSegmentSelected = false
 
     @IBAction func bottomSegmentedControlAction(_ sender: Any) {
         if favoriteSegmentSelected != bottomSegmentedControl.isSelected(for: .favorite) {
-            if let favoriteIndex = effectiveFilters.index(where: { $0.identifier == FilterIdentifier.isFavorite.rawValue }) {
+            if let favoriteIndex = effectiveFilters.firstIndex(where: { $0.identifier == FilterIdentifier.isFavorite.rawValue }) {
                 updateToggleFilter(at: favoriteIndex, with: bottomSegmentedControl.isSelected(for: .favorite))
             }
         }
 
         if downloadedSegmentSelected != bottomSegmentedControl.isSelected(for: .downloaded) {
-            if let downloadedIndex = effectiveFilters.index(where: { $0.identifier == FilterIdentifier.isDownloaded.rawValue }) {
+            if let downloadedIndex = effectiveFilters.firstIndex(where: { $0.identifier == FilterIdentifier.isDownloaded.rawValue }) {
                 updateToggleFilter(at: downloadedIndex, with: bottomSegmentedControl.isSelected(for: .downloaded))
             }
         }
 
         if unwatchedSegmentSelected != bottomSegmentedControl.isSelected(for: .unwatched) {
-            if let unwatchedIndex = effectiveFilters.index(where: { $0.identifier == FilterIdentifier.isUnwatched.rawValue }) {
+            if let unwatchedIndex = effectiveFilters.firstIndex(where: { $0.identifier == FilterIdentifier.isUnwatched.rawValue }) {
                 updateToggleFilter(at: unwatchedIndex, with: bottomSegmentedControl.isSelected(for: .unwatched))
+            }
+        }
+
+        if bookmarksSegmentSelected != bottomSegmentedControl.isSelected(for: .bookmarks) {
+            if let annotatedIndex = effectiveFilters.firstIndex(where: { $0.identifier == FilterIdentifier.hasBookmarks.rawValue }) {
+                updateToggleFilter(at: annotatedIndex, with: bottomSegmentedControl.isSelected(for: .bookmarks))
             }
         }
 
         favoriteSegmentSelected = bottomSegmentedControl.isSelected(for: .favorite)
         downloadedSegmentSelected = bottomSegmentedControl.isSelected(for: .downloaded)
         unwatchedSegmentSelected = bottomSegmentedControl.isSelected(for: .unwatched)
+        bookmarksSegmentSelected = bottomSegmentedControl.isSelected(for: .bookmarks)
     }
 
     @IBAction func searchFieldAction(_ sender: Any) {
-        guard let textIndex = effectiveFilters.index(where: { $0.identifier == FilterIdentifier.text.rawValue }) else { return }
+        guard let textIndex = effectiveFilters.firstIndex(where: { $0.identifier == FilterIdentifier.text.rawValue }) else { return }
 
         updateTextualFilter(at: textIndex, with: searchField.stringValue)
     }
@@ -132,6 +155,10 @@ final class SearchFiltersViewController: NSViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
+
+        if #available(OSX 10.14, *) {
+            vfxView.appearance = WWDCAppearance.appearance()
+        }
 
         setFilters(hidden: true)
 
@@ -153,7 +180,7 @@ final class SearchFiltersViewController: NSViewController {
 
         selectedItem.state = (selectedItem.state == .off) ? .on : .off
 
-        let selected = menu.items.filter({ $0.state == .on }).flatMap({ $0.representedObject as? FilterOption })
+        let selected = menu.items.filter({ $0.state == .on }).compactMap({ $0.representedObject as? FilterOption })
 
         filter.selectedOptions = selected
 
@@ -208,6 +235,7 @@ final class SearchFiltersViewController: NSViewController {
         }
     }
 
+    /// Updates the UI to match the active filters
     private func updateUI() {
         guard isViewLoaded else { return }
 
@@ -241,9 +269,7 @@ final class SearchFiltersViewController: NSViewController {
                     popUp.menu?.addItem(item)
                 }
             case let filter as TextualFilter:
-                if let value = filter.value {
-                    searchField.stringValue = value
-                }
+                searchField.stringValue = filter.value ?? ""
             case let filter as ToggleFilter:
                 guard let filterID = FilterIdentifier(rawValue: filter.identifier), let segmentIndex = FilterSegment(filterID)?.rawValue else {
                     break
@@ -259,5 +285,6 @@ final class SearchFiltersViewController: NSViewController {
         favoriteSegmentSelected = bottomSegmentedControl.isSelected(for: .favorite)
         downloadedSegmentSelected = bottomSegmentedControl.isSelected(for: .downloaded)
         unwatchedSegmentSelected = bottomSegmentedControl.isSelected(for: .unwatched)
+        bookmarksSegmentSelected = bottomSegmentedControl.isSelected(for: .bookmarks)
     }
 }

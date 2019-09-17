@@ -10,6 +10,7 @@ import Cocoa
 import ConfCore
 import RealmSwift
 import SwiftyJSON
+import os.log
 
 enum FilterIdentifier: String {
     case text
@@ -19,6 +20,7 @@ enum FilterIdentifier: String {
     case isFavorite
     case isDownloaded
     case isUnwatched
+    case hasBookmarks
 }
 
 final class SearchCoordinator {
@@ -27,6 +29,8 @@ final class SearchCoordinator {
 
     let scheduleController: SessionsTableViewController
     let videosController: SessionsTableViewController
+
+    private let log = OSLog(subsystem: "WWDC", category: "SearchCoordinator")
 
     /// The desired state of the filters upon configuration
     private let restorationFiltersState: JSON?
@@ -42,8 +46,7 @@ final class SearchCoordinator {
     init(_ storage: Storage,
          sessionsController: SessionsTableViewController,
          videosController: SessionsTableViewController,
-         restorationFiltersState: JSON? = nil)
-    {
+         restorationFiltersState: JSON? = nil) {
         self.storage = storage
         scheduleController = sessionsController
         self.videosController = videosController
@@ -94,21 +97,31 @@ final class SearchCoordinator {
         let favoritePredicate = NSPredicate(format: "SUBQUERY(favorites, $favorite, $favorite.isDeleted == false).@count > 0")
         var scheduleFavoriteFilter = ToggleFilter(identifier: FilterIdentifier.isFavorite.rawValue,
                                                   isOn: false,
+                                                  defaultValue: false,
                                                   customPredicate: favoritePredicate)
 
         let downloadedPredicate = NSPredicate(format: "isDownloaded == true")
         var scheduleDownloadedFilter = ToggleFilter(identifier: FilterIdentifier.isDownloaded.rawValue,
                                                     isOn: false,
+                                                    defaultValue: false,
                                                     customPredicate: downloadedPredicate)
 
-        let smallPositionPred = NSPredicate(format: "SUBQUERY(progresses, $progress, $progress.relativePosition < 0.9).@count > 0")
+        let smallPositionPred = NSPredicate(format: "SUBQUERY(progresses, $progress, $progress.relativePosition < \(Constants.watchedVideoRelativePosition)).@count > 0")
         let noPositionPred = NSPredicate(format: "progresses.@count == 0")
 
         let unwatchedPredicate = NSCompoundPredicate(orPredicateWithSubpredicates: [smallPositionPred, noPositionPred])
 
         var scheduleUnwatchedFilter = ToggleFilter(identifier: FilterIdentifier.isUnwatched.rawValue,
                                                    isOn: false,
+                                                   defaultValue: false,
                                                    customPredicate: unwatchedPredicate)
+
+        let bookmarksPredicate = NSPredicate(format: "SUBQUERY(bookmarks, $bookmark, $bookmark.isDeleted == false).@count > 0")
+
+        var scheduleBookmarksFilter = ToggleFilter(identifier: FilterIdentifier.hasBookmarks.rawValue,
+                                                     isOn: false,
+                                                     defaultValue: false,
+                                                     customPredicate: bookmarksPredicate)
 
         // Schedule Filtering State Restoration
 
@@ -121,6 +134,7 @@ final class SearchCoordinator {
         scheduleFavoriteFilter.isOn = savedScheduleFiltersState?[FilterIdentifier.isFavorite.rawValue]["isOn"].bool ?? false
         scheduleDownloadedFilter.isOn = savedScheduleFiltersState?[FilterIdentifier.isDownloaded.rawValue]["isOn"].bool ?? false
         scheduleUnwatchedFilter.isOn = savedScheduleFiltersState?[FilterIdentifier.isUnwatched.rawValue]["isOn"].bool ?? false
+        scheduleBookmarksFilter.isOn = savedScheduleFiltersState?[FilterIdentifier.hasBookmarks.rawValue]["isOn"].bool ?? false
 
         let scheduleSearchFilters: [FilterType] = [scheduleTextualFilter,
                                                    scheduleEventFilter,
@@ -128,15 +142,11 @@ final class SearchCoordinator {
                                                    scheduleTrackFilter,
                                                    scheduleFavoriteFilter,
                                                    scheduleDownloadedFilter,
-                                                   scheduleUnwatchedFilter]
+                                                   scheduleUnwatchedFilter,
+                                                   scheduleBookmarksFilter]
 
         if !scheduleSearchController.filters.isIdentical(to: scheduleSearchFilters) {
             scheduleSearchController.filters = scheduleSearchFilters
-
-            let activeScheduleFilters = scheduleSearchFilters.filter { !$0.isEmpty }
-            if activeScheduleFilters.count > 0 {
-                updateSearchResults(for: scheduleController, with: activeScheduleFilters)
-            }
         }
 
         // Videos Filter Configuration
@@ -159,6 +169,7 @@ final class SearchCoordinator {
         var videosFavoriteFilter = scheduleFavoriteFilter
         var videosDownloadedFilter = scheduleDownloadedFilter
         var videosUnwatchedFilter = scheduleUnwatchedFilter
+        var videosBookmarksFilter = scheduleBookmarksFilter
 
         // Videos Filtering State Restoration
 
@@ -169,6 +180,7 @@ final class SearchCoordinator {
         videosFavoriteFilter.isOn = savedVideosFiltersState?[FilterIdentifier.isFavorite.rawValue]["isOn"].bool ?? false
         videosDownloadedFilter.isOn = savedVideosFiltersState?[FilterIdentifier.isDownloaded.rawValue]["isOn"].bool ?? false
         videosUnwatchedFilter.isOn = savedVideosFiltersState?[FilterIdentifier.isUnwatched.rawValue]["isOn"].bool ?? false
+        videosBookmarksFilter.isOn = savedVideosFiltersState?[FilterIdentifier.hasBookmarks.rawValue]["isOn"].bool ?? false
 
         let videosSearchFilters: [FilterType] = [videosTextualFilter,
                                                  videosEventFilter,
@@ -176,32 +188,27 @@ final class SearchCoordinator {
                                                  videosTrackFilter,
                                                  videosFavoriteFilter,
                                                  videosDownloadedFilter,
-                                                 videosUnwatchedFilter]
+                                                 videosUnwatchedFilter,
+                                                 videosBookmarksFilter]
 
         if !videosSearchController.filters.isIdentical(to: videosSearchFilters) {
             videosSearchController.filters = videosSearchFilters
-
-            let activeVideosFilters = videosSearchFilters.filter { !$0.isEmpty }
-            if activeVideosFilters.count > 0 {
-                updateSearchResults(for: videosController, with: activeVideosFilters)
-            }
         }
 
         // set delegates
         scheduleSearchController.delegate = self
         videosSearchController.delegate = self
+
+        updateSearchResults(for: scheduleController, with: scheduleSearchController.filters)
+        updateSearchResults(for: videosController, with: videosSearchController.filters)
     }
 
-    fileprivate lazy var searchQueue: DispatchQueue = DispatchQueue(label: "Search", qos: .userInteractive)
-
-    fileprivate func updateSearchResults(for controller: SessionsTableViewController, with filters: [FilterType]) {
+    func newFilterResults(for controller: SessionsTableViewController, filters: [FilterType]) -> FilterResults {
         guard filters.contains(where: { !$0.isEmpty }) else {
-            controller.searchResults = nil
-
-            return
+            return FilterResults(storage: storage, query: nil)
         }
 
-        var subpredicates = filters.flatMap { $0.predicate }
+        var subpredicates = filters.compactMap { $0.predicate }
 
         if controller == scheduleController {
             subpredicates.append(NSPredicate(format: "ANY event.isCurrent == true"))
@@ -210,34 +217,15 @@ final class SearchCoordinator {
             subpredicates.append(Session.videoPredicate)
         }
 
-        var predicate = NSCompoundPredicate(andPredicateWithSubpredicates: subpredicates)
+        let predicate = NSCompoundPredicate(andPredicateWithSubpredicates: subpredicates)
 
-        if let appDelegate = NSApplication.shared.delegate as? AppDelegate,
-            let currentlyPlayingSession = appDelegate.coordinator.currentPlayerController?.sessionViewModel.session {
+        os_log("%{public}@", log: log, type: .debug, String(describing: predicate))
 
-            // Keep the currently playing video in the list to ensure PIP can re-select it if needed
-            predicate = NSCompoundPredicate(orPredicateWithSubpredicates: [predicate, NSPredicate(format: "identifier == %@", currentlyPlayingSession.identifier)])
-        }
+        return FilterResults(storage: storage, query: predicate)
+    }
 
-        #if DEBUG
-            print(predicate)
-        #endif
-
-        searchQueue.async { [unowned self] in
-            do {
-                let realm = try Realm(configuration: self.storage.realmConfig)
-
-                let results = realm.objects(Session.self).filter(predicate)
-                let keys: Set<String> = Set(results.map { $0.identifier })
-
-                DispatchQueue.main.async {
-                    let searchResults = self.storage.realm.objects(Session.self).filter("identifier IN %@", keys)
-                    controller.searchResults = searchResults
-                }
-            } catch {
-                LoggingHelper.registerError(error, info: ["when": "Searching"])
-            }
-        }
+    fileprivate func updateSearchResults(for controller: SessionsTableViewController, with filters: [FilterType]) {
+        controller.setFilterResults(newFilterResults(for: controller, filters: filters), animated: true, selecting: nil)
     }
 
     @objc fileprivate func activateSearchField() {
@@ -273,5 +261,5 @@ extension SearchCoordinator: SearchFiltersViewControllerDelegate {
             updateSearchResults(for: videosController, with: filters)
         }
     }
-    
+
 }

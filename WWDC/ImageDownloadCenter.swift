@@ -8,6 +8,7 @@
 
 import Cocoa
 import RealmSwift
+import os.log
 
 typealias ImageDownloadCompletionBlock = (_ sourceURL: URL, _ original: NSImage?, _ thumbnail: NSImage?) -> Void
 
@@ -17,6 +18,7 @@ final class ImageDownloadCenter {
 
     private let cacheProvider = ImageCacheProvider()
     private let queue = OperationQueue()
+    private let log = OSLog(subsystem: "WWDC", category: "ImageDownloadCenter")
 
     func downloadImage(from url: URL, thumbnailHeight: CGFloat, thumbnailOnly: Bool = false, completion: @escaping ImageDownloadCompletionBlock) -> Operation? {
         if let cache = cacheProvider.cacheEntity(for: url) {
@@ -36,7 +38,14 @@ final class ImageDownloadCenter {
             return nil
         }
 
-        guard !hasActiveOperation(for: url) else { return nil }
+        guard !hasActiveOperation(for: url) else {
+            os_log("Unhandled case: A valid download operation already exists for the URL %{public}@",
+                   log: self.log,
+                   type: .error,
+                   url.absoluteString)
+
+            return nil
+        }
 
         let operation = ImageDownloadOperation(url: url, cache: cacheProvider, thumbnailHeight: thumbnailHeight)
         operation.imageCompletionHandler = completion
@@ -50,7 +59,7 @@ final class ImageDownloadCenter {
         return queue.operations.contains { op in
             guard let op = op as? ImageDownloadOperation else { return false }
 
-            return op.url == url && op.isExecuting
+            return op.url == url && op.isExecuting && !op.isCancelled
         }
     }
 
@@ -75,9 +84,10 @@ private final class ImageCacheProvider {
     private var thumbCaches: [URL: URL] = [:]
 
     private let upperLimit = 16 * 1024 * 1024
+    private let log = OSLog(subsystem: "WWDC", category: "ImageCacheProvider")
 
     private func makeRealm() -> Realm? {
-        let filePath = PathUtil.appSupportPath + "/ImageCache.realm"
+        let filePath = PathUtil.appSupportPathAssumingExisting + "/ImageCache.realm"
 
         var realmConfig = Realm.Configuration(fileURL: URL(fileURLWithPath: filePath))
         realmConfig.objectTypes = [ImageCacheEntity.self]
@@ -103,21 +113,24 @@ private final class ImageCacheProvider {
         DispatchQueue.global(qos: .utility).async {
             autoreleasepool {
                 guard let bgRealm = self.makeRealm() else { return }
-                
+
                 let entity = ImageCacheEntity()
-                
+
                 entity.key = key.absoluteString
                 entity.original = original
                 entity.thumbnail = thumbnail
-                
+
                 do {
                     try bgRealm.write {
                         bgRealm.add(entity, update: true)
                     }
-                    
+
                     bgRealm.invalidate()
                 } catch {
-                    NSLog("Error saving cached image: \(error)")
+                    os_log("Failed to save cached image to disk: %{public}@",
+                           log: self.log,
+                           type: .error,
+                           String(describing: error))
                 }
             }
         }
@@ -140,7 +153,7 @@ private final class ImageDownloadOperation: Operation {
         self.thumbnailHeight = thumbnailHeight
     }
 
-    open override var isAsynchronous: Bool {
+    public override var isAsynchronous: Bool {
         return true
     }
 
@@ -153,7 +166,7 @@ private final class ImageDownloadOperation: Operation {
         }
     }
 
-    open override var isExecuting: Bool {
+    public override var isExecuting: Bool {
         return _executing
     }
 
@@ -166,7 +179,7 @@ private final class ImageDownloadOperation: Operation {
         }
     }
 
-    open override var isFinished: Bool {
+    public override var isFinished: Bool {
         return _finished
     }
 
@@ -176,7 +189,11 @@ private final class ImageDownloadOperation: Operation {
         URLSession.shared.dataTask(with: url) { [weak self] data, response, error in
             guard let welf = self else { return }
 
-            guard !welf.isCancelled else { return }
+            guard !welf.isCancelled else {
+                welf._executing = false
+                welf._finished = true
+                return
+            }
 
             guard let data = data, let httpResponse = response as? HTTPURLResponse, error == nil else {
                 DispatchQueue.main.async { welf.imageCompletionHandler?(welf.url, nil, nil) }
@@ -206,7 +223,11 @@ private final class ImageDownloadOperation: Operation {
                 return
             }
 
-            guard !welf.isCancelled else { return }
+            guard !welf.isCancelled else {
+                welf._executing = false
+                welf._finished = true
+                return
+            }
 
             let thumbnailImage = originalImage.resized(to: welf.thumbnailHeight)
 
@@ -221,12 +242,12 @@ private final class ImageDownloadOperation: Operation {
 
             welf._executing = false
             welf._finished = true
-            }.resume()
+        }.resume()
     }
 
 }
 
-private extension NSImage {
+extension NSImage {
 
     func resized(to maxHeight: CGFloat) -> NSImage {
         let scaleFactor = maxHeight / size.height
@@ -241,5 +262,5 @@ private extension NSImage {
 
         return resizedImage
     }
-    
+
 }

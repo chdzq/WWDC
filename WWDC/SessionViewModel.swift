@@ -8,14 +8,13 @@
 
 import Cocoa
 import ConfCore
-import IGListKit
 import RxRealm
 import RxSwift
 import RxCocoa
 import RealmSwift
 import PlayerUI
 
-final class SessionViewModel: NSObject {
+final class SessionViewModel {
 
     let style: SessionsListStyle
     var title: String
@@ -29,66 +28,83 @@ final class SessionViewModel: NSObject {
     private var disposeBag = DisposeBag()
 
     lazy var rxSession: Observable<Session> = {
-        return Observable.from(object: self.session)
+        return Observable.from(object: session)
+    }()
+
+    lazy var rxSessionInstance: Observable<SessionInstance> = {
+        return Observable.from(object: sessionInstance)
     }()
 
     lazy var rxTitle: Observable<String> = {
-        return Observable.from(object: self.session).map({ $0.title })
+        return rxSession.map { $0.title }
     }()
 
     lazy var rxSubtitle: Observable<String> = {
-        return Observable.from(object: self.session).map({ SessionViewModel.subtitle(from: $0, at: $0.event.first) })
+        return rxSession.map { SessionViewModel.subtitle(from: $0, at: $0.event.first) }
     }()
 
     lazy var rxTrackName: Observable<String> = {
-        return Observable.from(object: self.session).map({ $0.track.first?.name }).ignoreNil()
+        return rxSession.map { $0.track.first?.name }.ignoreNil()
     }()
 
     lazy var rxSummary: Observable<String> = {
-        return Observable.from(object: self.session).map({ $0.summary })
+        return rxSession.map { $0.summary }
     }()
+
+    lazy var rxActionPrompt: Observable<String?> = {
+        guard sessionInstance.startTime > today() else { return Observable.just(nil) }
+        guard actionLinkURL != nil else { return Observable.just(nil) }
+
+        return rxSessionInstance.map { $0.actionLinkPrompt }
+    }()
+
+    var actionLinkURL: URL? {
+        guard let candidateURL = sessionInstance.actionLinkURL else { return nil }
+
+        return URL(string: candidateURL)
+    }
 
     lazy var rxContext: Observable<String> = {
         if self.style == .schedule {
-            let so = Observable.from(object: self.session)
-            let io = Observable.from(object: self.sessionInstance)
 
-            return Observable.zip(so, io).map({ SessionViewModel.context(for: $0.0, instance: $0.1) })
+            return Observable.combineLatest(rxSession, rxSessionInstance).map {
+                SessionViewModel.context(for: $0.0, instance: $0.1)
+            }
         } else {
-            return Observable.from(object: self.session).map({ SessionViewModel.context(for: $0) })
+            return rxSession.map { SessionViewModel.context(for: $0) }
         }
     }()
 
     lazy var rxFooter: Observable<String> = {
-        return Observable.from(object: self.session).map({ SessionViewModel.footer(for: $0, at: $0.event.first) })
+        return rxSession.map { SessionViewModel.footer(for: $0, at: $0.event.first) }
     }()
 
     lazy var rxSessionType: Observable<SessionInstanceType> = {
-        return Observable.from(object: self.session).map({ $0.instances.first?.type }).ignoreNil()
+        return rxSession.map { $0.instances.first?.type }.ignoreNil()
     }()
 
     lazy var rxColor: Observable<NSColor> = {
-        return Observable.from(object: self.session).map({ SessionViewModel.trackColor(for: $0) }).ignoreNil()
+        return rxSession.map { SessionViewModel.trackColor(for: $0) }.ignoreNil()
     }()
 
     lazy var rxDarkColor: Observable<NSColor> = {
-        return Observable.from(object: self.session).map({ SessionViewModel.darkTrackColor(for: $0) }).ignoreNil()
+        return rxSession.map { SessionViewModel.darkTrackColor(for: $0) }.ignoreNil()
     }()
 
     lazy var rxImageUrl: Observable<URL?> = {
-        return Observable.from(object: self.session).map({ SessionViewModel.imageUrl(for: $0) })
+        return rxSession.map { SessionViewModel.imageUrl(for: $0) }
     }()
 
     lazy var rxWebUrl: Observable<URL?> = {
-        return Observable.from(object: self.session).map({ SessionViewModel.webUrl(for: $0) })
+        return rxSession.map { SessionViewModel.webUrl(for: $0) }
     }()
 
     lazy var rxIsDownloaded: Observable<Bool> = {
-        return Observable.from(object: self.session).map({ $0.isDownloaded })
+        return rxSession.map { $0.isDownloaded }
     }()
 
     lazy var rxIsFavorite: Observable<Bool> = {
-        return Observable.collection(from: self.session.favorites.filter("isDeleted == false")).map({ $0.count > 0 })
+        return Observable.collection(from: self.session.favorites.filter("isDeleted == false")).map { $0.count > 0 }
     }()
 
     lazy var rxIsCurrentlyLive: Observable<Bool> = {
@@ -96,7 +112,7 @@ final class SessionViewModel: NSObject {
             return Observable.just(false)
         }
 
-        return Observable.from(object: self.sessionInstance).map({ $0.isCurrentlyLive })
+        return rxSessionInstance.map { $0.isCurrentlyLive }
     }()
 
     lazy var rxIsLab: Observable<Bool> = {
@@ -104,11 +120,11 @@ final class SessionViewModel: NSObject {
             return Observable.just(false)
         }
 
-        return Observable.from(object: self.sessionInstance).map({ $0.type == .lab })
+        return rxSessionInstance.map { [.lab, .labByAppointment].contains($0.type) }
     }()
 
     lazy var rxPlayableContent: Observable<Results<SessionAsset>> = {
-        let playableAssets = self.session.assets.filter("rawAssetType == %@ OR rawAssetType == %@", SessionAssetType.streamingVideo.rawValue, SessionAssetType.liveStreamVideo.rawValue)
+        let playableAssets = self.session.assets(matching: [.streamingVideo, .liveStreamVideo])
 
         return Observable.collection(from: playableAssets)
     }()
@@ -117,11 +133,11 @@ final class SessionViewModel: NSObject {
         let validAssets = self.session.assets.filter("(rawAssetType == %@ AND remoteURL != '') OR (rawAssetType == %@ AND SUBQUERY(session.instances, $instance, $instance.isCurrentlyLive == true).@count > 0)", SessionAssetType.streamingVideo.rawValue, SessionAssetType.liveStreamVideo.rawValue)
         let validAssetsObservable = Observable.collection(from: validAssets)
 
-        return validAssetsObservable.map({ $0.count > 0 })
+        return validAssetsObservable.map { $0.count > 0 }
     }()
 
     lazy var rxDownloadableContent: Observable<Results<SessionAsset>> = {
-        let downloadableAssets = self.session.assets.filter("(rawAssetType == %@ AND remoteURL != '')", SessionAssetType.hdVideo.rawValue)
+        let downloadableAssets = self.session.assets.filter("(rawAssetType == %@ AND remoteURL != '')", DownloadManager.downloadQuality.rawValue)
 
         return Observable.collection(from: downloadableAssets)
     }()
@@ -130,6 +146,15 @@ final class SessionViewModel: NSObject {
         let progresses = self.session.progresses.filter(NSPredicate(value: true))
 
         return Observable.collection(from: progresses)
+    }()
+
+    lazy var rxRelatedSessions: Observable<Results<RelatedResource>> = {
+        // Return sessions with videos, or any session that hasn't yet occurred
+        let predicateFormat = "type == %@ AND (ANY session.assets.rawAssetType == %@ OR ANY session.instances.startTime >= %@)"
+        let relatedPredicate = NSPredicate(format: predicateFormat, RelatedResourceType.session.rawValue, SessionAssetType.streamingVideo.rawValue, today() as NSDate)
+        let validRelatedSessions = self.session.related.filter(relatedPredicate)
+
+        return Observable.collection(from: validRelatedSessions)
     }()
 
     convenience init?(session: Session) {
@@ -149,19 +174,26 @@ final class SessionViewModel: NSObject {
         identifier = session.identifier
         imageUrl = SessionViewModel.imageUrl(for: session)
 
-        if let webUrlStr = session.asset(of: .webpage)?.remoteURL {
+        if let webUrlStr = session.asset(ofType: .webpage)?.remoteURL {
             webUrl = URL(string: webUrlStr)
         }
-
-        super.init()
     }
 
     static func subtitle(from session: Session, at event: ConfCore.Event?) -> String {
         guard let event = event else { return "" }
 
         let year = Calendar.current.component(.year, from: event.startDate)
+        var name = event.name
 
-        return "WWDC \(year) · Session \(session.number)"
+        /*
+        We want to make sure that WWDC events show the year
+        So we add it it not present.
+        */
+        if name == "WWDC" {
+            name.append(" \(year)")
+        }
+
+        return "\(name) · Session \(session.number)"
     }
 
     static func focusesDescription(from focuses: [Focus], collapse: Bool) -> String {
@@ -210,7 +242,7 @@ final class SessionViewModel: NSObject {
 
         var result = "\(event.name) · Session \(session.number)"
 
-        if (event.startDate...event.endDate).contains(Date()), let date = session.instances.first?.startTime {
+        if (event.startDate...event.endDate).contains(today()), let date = session.instances.first?.startTime {
             result += " · " + standardFormatted(date: date, withTimeZoneName: false)
         }
 
@@ -227,12 +259,12 @@ final class SessionViewModel: NSObject {
 
     static func imageUrl(for session: Session) -> URL? {
         if let instance = session.instances.first {
-            guard instance.type == .session || instance.type == .lab else {
+            guard [.session, .lab, .labByAppointment].contains(instance.type) else {
                 return nil
             }
         }
 
-        let imageAsset = session.asset(of: .image)
+        let imageAsset = session.asset(ofType: .image)
 
         guard let thumbnail = imageAsset?.remoteURL, let thumbnailUrl = URL(string: thumbnail) else { return nil }
 
@@ -240,7 +272,7 @@ final class SessionViewModel: NSObject {
     }
 
     static func webUrl(for session: Session) -> URL? {
-        guard let url = session.asset(of: .webpage)?.remoteURL else { return nil }
+        guard let url = session.asset(ofType: .webpage)?.remoteURL else { return nil }
 
         return URL(string: url)
     }
@@ -257,7 +289,17 @@ final class SessionViewModel: NSObject {
         return NSColor.fromHexString(hexString: code)
     }
 
-    static let dateFormatter: DateFormatter = {
+    static let shortDayOfTheWeekFormatter: DateFormatter = {
+        let df = DateFormatter()
+
+        df.locale = Locale.current
+        df.timeZone = TimeZone.current
+        df.dateFormat = "E"
+
+        return df
+    }()
+
+    static let dayOfTheWeekFormatter: DateFormatter = {
         let df = DateFormatter()
 
         df.locale = Locale.current
@@ -286,34 +328,19 @@ final class SessionViewModel: NSObject {
     }
 
     static func standardFormatted(date: Date, withTimeZoneName: Bool) -> String {
-        let result = dateFormatter.string(from: date) + ", " + timeFormatter.string(from: date)
+        let result = dayOfTheWeekFormatter.string(from: date) + ", " + timeFormatter.string(from: date)
 
         return withTimeZoneName ? result + timeZoneNameSuffix : result
     }
 
 }
 
-extension SessionViewModel: IGListDiffable {
-
-    func diffIdentifier() -> NSObjectProtocol {
-        return identifier as NSObjectProtocol
-    }
-    
-    func isEqual(toDiffableObject object: IGListDiffable?) -> Bool {
-        guard let other = object as? SessionViewModel else { return false }
-        
-        return identifier == other.identifier &&
-               title == other.title
-    }
-    
-}
-
 extension SessionViewModel: UserActivityRepresentable { }
 
 extension SessionViewModel {
-    
+
     var isFavorite: Bool {
         return session.favorites.filter("isDeleted == false").count > 0
     }
-    
+
 }
